@@ -639,6 +639,24 @@ class TeacherModelConfig(BaseConfig):
         Field(description="The model configuration for the teacher model."),
     ] = ModelConfig()
 
+    context: Annotated[
+        str | None,
+        Field(
+            description="Extra context to prepend to the student prompt when computing teacher logprobs. "
+            "When set, enables context distillation mode where the teacher sees a different (enhanced) "
+            "prompt compared to the student. The context is prepended to the student's prompt text."
+        ),
+    ] = None
+
+    eval_baseline: Annotated[
+        bool,
+        Field(
+            description="If True and context is set, run baseline evaluation before training starts. "
+            "This evaluates both student (without context) and teacher (with context) on the eval set "
+            "and logs the results for comparison. Useful for measuring the effect of the context."
+        ),
+    ] = False
+
 
 class OrchestratorConfig(BaseSettings):
     """Configures the orchestrator for RL training."""

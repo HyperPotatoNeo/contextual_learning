@@ -112,6 +112,7 @@ def compute_loss(
     total_geo_masked_high = []
     total_geo_seq_ratio = []
     total_teacher_kl = []
+    total_combined_advantage = []
 
     if teacher_logprobs is None:
         teacher_logprobs = [None] * len(trainer_logprobs)
@@ -148,7 +149,15 @@ def compute_loss(
 
         advantages = loss_config.adv_tau * advantages
         if teacher_logprobs is not None:
-            advantages = advantages + loss_config.teacher_tau * teacher_kl.detach()
+            # Separate weights for teacher log prob and student log prob (entropy) terms
+            # teacher_kl = teacher_logprobs - trainer_logprobs
+            # Split into: teacher_tau * teacher_logprobs - student_tau * trainer_logprobs
+            advantages = (
+                advantages
+                + loss_config.teacher_tau * teacher_logprobs.detach()
+                - loss_config.student_tau * trainer_logprobs.detach()
+            )
+        total_combined_advantage.append(_safe_mean(advantages, loss_mask))
         coeff = importance_ratio * (advantages - loss_config.kl_tau * log_importance_ratio)
         loss = -(coeff.detach() * trainer_logprobs)[keep_mask].sum()
 
@@ -187,6 +196,7 @@ def compute_loss(
         "geo_masked_low": torch.stack(total_geo_masked_low),
         "geo_masked_high": torch.stack(total_geo_masked_high),
         "geo_seq_ratio": torch.stack(total_geo_seq_ratio),
+        "combined_advantage": torch.stack(total_combined_advantage),
     }
     if total_teacher_kl:
         result["teacher_kl"] = torch.stack(total_teacher_kl)

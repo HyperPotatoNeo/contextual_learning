@@ -1,9 +1,35 @@
 from copy import deepcopy
+from typing import Any
 
 import verifiers as vf
 
 from prime_rl.transport import TrainingSample
 from prime_rl.utils.logger import get_logger
+
+
+def _extract_prompt_text(prompt: Any) -> str | None:
+    """
+    Extract prompt text from either string or chat message format.
+
+    Args:
+        prompt: Either a string or a list of chat messages like [{"role": "user", "content": "..."}]
+
+    Returns:
+        The prompt as a string, or None if extraction fails.
+    """
+    if prompt is None:
+        return None
+    if isinstance(prompt, str):
+        return prompt
+    if isinstance(prompt, list):
+        # Chat format: extract user message content
+        for msg in prompt:
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                return msg.get("content")
+        # Fallback: concatenate all content
+        contents = [msg.get("content", "") for msg in prompt if isinstance(msg, dict)]
+        return "\n".join(contents) if contents else None
+    return None
 
 
 def interleave_rollout(state: vf.State) -> list[TrainingSample] | None:
@@ -40,6 +66,7 @@ def interleave_rollout(state: vf.State) -> list[TrainingSample] | None:
         completion_temperatures=[temperature] * len(completion_ids),  # Per-token temperatures
         teacher_logprobs=None,  # Populated at the end after full sequence length is known if teacher model is configured
         advantage=None,
+        prompt_text=_extract_prompt_text(first_step.get("prompt")),  # For context distillation
     )
 
     # Interleave all other trajectory steps into completion
@@ -109,6 +136,7 @@ def branch_rollout(state: vf.State) -> list[TrainingSample] | None:
             completion_temperatures=[temperature] * len(completion_ids),  # Per-token temperatures
             advantage=None,
             teacher_logprobs=None,
+            prompt_text=_extract_prompt_text(step.get("prompt")),  # For context distillation
         )
         rollouts.append(rollout)
     return rollouts

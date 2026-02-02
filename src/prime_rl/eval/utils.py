@@ -879,3 +879,124 @@ async def run_evals_subprocess(
         logger.error(f"Eval subprocess failed with exit code {process.exitcode}")
     else:
         logger.success(f"Eval subprocess completed for checkpoint step {ckpt_step}")
+
+
+async def run_context_distillation_baseline_eval(
+    clients: list[AsyncOpenAI],
+    eval_config: EvalConfig,
+    model_name: str,
+    sampling_config: EvalSamplingConfig,
+    teacher_context: str,
+    output_dir: Path,
+) -> dict[str, float]:
+    """
+    Run baseline evaluation for context distillation before training starts.
+
+    This evaluates both:
+    1. Student baseline: model without the teacher context (normal eval)
+    2. Teacher baseline: model with the teacher context prepended to prompts
+
+    The results are logged to help measure the effect of the context and track
+    how well the student learns to internalize the teacher's behavior.
+
+    Args:
+        clients: List of async OpenAI clients.
+        eval_config: Evaluation configuration.
+        model_name: Name of the model being evaluated.
+        sampling_config: Sampling configuration for generation.
+        teacher_context: The context to prepend for teacher baseline.
+        output_dir: Output directory for results.
+
+    Returns:
+        Dict with baseline metrics: {"student_baseline": avg_reward, "teacher_baseline": avg_reward}
+    """
+    logger = get_logger()
+    monitor = get_monitor()
+
+    results = {}
+
+    for env_config in eval_config.env:
+        env_name = env_config.id
+        logger.info(f"Running context distillation baseline eval for {env_name}")
+
+        # Load environment and dataset
+        env = load_environment(env_config.id, **env_config.args)
+        num_examples = env_config.num_examples or eval_config.num_examples
+        rollouts_per_example = env_config.rollouts_per_example or eval_config.rollouts_per_example
+        dataset = env.get_eval_dataset(n=num_examples)
+        examples = dataset.to_list()
+
+        sampling_args = prepare_sampling_args(sampling_config)
+
+        # Helper to run a single group and extract rewards
+        async def eval_single_group(
+            client: AsyncOpenAI,
+            example: dict,
+            with_context: bool,
+        ) -> list[float]:
+            eval_example = example
+            if with_context:
+                # Create modified example with context prepended to user prompt
+                eval_example = deepcopy(example)
+                if "prompt" in eval_example and eval_example["prompt"]:
+                    if isinstance(eval_example["prompt"], str):
+                        eval_example["prompt"] = teacher_context + "\n\n" + eval_example["prompt"]
+                    elif isinstance(eval_example["prompt"], list):
+                        # Handle chat format - find and modify the user message
+                        for msg in eval_example["prompt"]:
+                            if msg.get("role") == "user":
+                                msg["content"] = teacher_context + "\n\n" + msg.get("content", "")
+                                break
+                elif "task" in eval_example and eval_example["task"]:
+                    eval_example["task"] = teacher_context + "\n\n" + eval_example["task"]
+
+            try:
+                states = await generate_group(
+                    client, env, model_name, eval_example, rollouts_per_example, sampling_args
+                )
+                return [state["reward"] for state in states if state.get("reward") is not None]
+            except Exception as e:
+                logger.warning(f"Baseline eval failed for example {example.get('example_id')}: {e}")
+                return []
+
+        # === Student Baseline (no context) - parallelized ===
+        logger.info(f"Evaluating student baseline (no context) on {env_name}")
+        student_tasks = [
+            eval_single_group(client, example, with_context=False) for client, example in zip(cycle(clients), examples)
+        ]
+        student_results = await asyncio.gather(*student_tasks)
+        student_rewards = [r for rewards in student_results for r in rewards]
+
+        student_avg = sum(student_rewards) / len(student_rewards) if student_rewards else 0.0
+        logger.info(f"Student baseline avg reward: {student_avg:.4f} ({len(student_rewards)} samples)")
+
+        # === Teacher Baseline (with context) - parallelized ===
+        logger.info(f"Evaluating teacher baseline (with context) on {env_name}")
+        teacher_tasks = [
+            eval_single_group(client, example, with_context=True) for client, example in zip(cycle(clients), examples)
+        ]
+        teacher_results = await asyncio.gather(*teacher_tasks)
+        teacher_rewards = [r for rewards in teacher_results for r in rewards]
+
+        teacher_avg = sum(teacher_rewards) / len(teacher_rewards) if teacher_rewards else 0.0
+        logger.info(f"Teacher baseline avg reward: {teacher_avg:.4f} ({len(teacher_rewards)} samples)")
+
+        # Log results
+        baseline_metrics = {
+            f"eval/{env_name}/baseline_student/avg": student_avg,
+            f"eval/{env_name}/baseline_teacher/avg": teacher_avg,
+            f"eval/{env_name}/baseline_diff": teacher_avg - student_avg,
+            "progress/ckpt_step": 0,
+            "step": 0,
+        }
+        monitor.log(baseline_metrics, step=None)
+
+        results[f"{env_name}_student"] = student_avg
+        results[f"{env_name}_teacher"] = teacher_avg
+
+        logger.success(
+            f"Context distillation baseline for {env_name}: "
+            f"student={student_avg:.4f}, teacher={teacher_avg:.4f}, diff={teacher_avg - student_avg:+.4f}"
+        )
+
+    return results

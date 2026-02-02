@@ -1,7 +1,10 @@
 import asyncio
 from itertools import cycle
 from pathlib import Path
-from typing import Any, AsyncContextManager
+from typing import TYPE_CHECKING, Any, AsyncContextManager
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
 
 import pandas as pd
 from openai import AsyncOpenAI
@@ -165,6 +168,74 @@ async def compute_teacher_logprobs(
                 cast_to=ChatCompletion,
             )
         return [0.0 if lp is None else float(next(iter(lp.values()))["logprob"]) for lp in response.prompt_logprobs]
+
+    return await asyncio.gather(*[_compute_single(client, sample) for client, sample in zip(cycle(clients), samples)])
+
+
+async def compute_teacher_logprobs_with_context(
+    clients: list[AsyncOpenAI],
+    model_name: str,
+    samples: list[TrainingSample],
+    tokenizer: "PreTrainedTokenizerBase",
+    teacher_context: str,
+) -> list[list[float]]:
+    """
+    Compute teacher model logprobs with a different (enhanced) prompt for context distillation.
+
+    Unlike compute_teacher_logprobs which uses the same prompt for teacher and student,
+    this function prepends teacher_context to the user prompt when computing teacher logprobs.
+    This enables context distillation where the teacher sees additional instructions/context.
+
+    Args:
+        clients: List of async OpenAI clients for the teacher model.
+        model_name: Name of the teacher model.
+        samples: List of training samples with prompt_text populated.
+        tokenizer: Tokenizer for encoding the teacher prompt.
+        teacher_context: Extra context to prepend to the user prompt.
+
+    Returns:
+        List of logprobs for each sample. Each list contains logprobs only for the completion
+        tokens (not the teacher prompt), aligned with the student's sequence length.
+    """
+
+    async def _compute_single(client: AsyncOpenAI, sample: TrainingSample) -> list[float]:
+        if sample.prompt_text is None:
+            raise ValueError(
+                "prompt_text is required for context distillation. Ensure trajectory conversion populates this field."
+            )
+        # Prepend teacher context to the user prompt
+        enhanced_prompt = teacher_context + "\n\n" + sample.prompt_text
+        # Build message with combined content as user message
+        messages = [{"role": "user", "content": enhanced_prompt}]
+        # Apply chat template to get properly formatted prompt
+        teacher_prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        teacher_prompt_ids = tokenizer.encode(teacher_prompt_text, add_special_tokens=False)
+
+        async with await get_semaphore():
+            response = await client.post(
+                "/chat/completions/tokens",
+                body={
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": ""}],
+                    "tokens": teacher_prompt_ids + sample.completion_ids,
+                    "max_tokens": 1,
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "skip_special_tokens": False,
+                    "prompt_logprobs": True,
+                },
+                cast_to=ChatCompletion,
+            )
+
+        # Extract all logprobs from the response
+        all_logprobs = [
+            0.0 if lp is None else float(next(iter(lp.values()))["logprob"]) for lp in response.prompt_logprobs
+        ]
+
+        # Return only the completion logprobs (offset by teacher prompt length)
+        # The teacher prompt is longer than student prompt due to prepended context
+        completion_start = len(teacher_prompt_ids)
+        return all_logprobs[completion_start:]
 
     return await asyncio.gather(*[_compute_single(client, sample) for client, sample in zip(cycle(clients), samples)])
 

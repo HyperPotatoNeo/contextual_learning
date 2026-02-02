@@ -23,13 +23,14 @@ import verifiers as vf
 from loguru import logger
 from transformers import AutoTokenizer
 
-from prime_rl.eval.utils import run_evals_subprocess
+from prime_rl.eval.utils import run_context_distillation_baseline_eval, run_evals_subprocess
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
 from prime_rl.orchestrator.config import BufferConfig, OrchestratorConfig
 from prime_rl.orchestrator.scheduler import Scheduler
 from prime_rl.orchestrator.utils import (
     compute_teacher_logprobs,
+    compute_teacher_logprobs_with_context,
     get_sampling_args,
     get_weight_dir,
     print_benchmark,
@@ -261,6 +262,28 @@ async def orchestrate(config: OrchestratorConfig):
     empty_batch_retries = 0
     max_empty_batch_retries = 5
 
+    # Run context distillation baseline eval if configured
+    # This evaluates both student (no context) and teacher (with context) before training
+    if (
+        config.teacher_model is not None
+        and config.teacher_model.context is not None
+        and config.teacher_model.eval_baseline
+        and config.eval is not None
+    ):
+        logger.info("Running context distillation baseline evaluation before training")
+        try:
+            await run_context_distillation_baseline_eval(
+                clients=clients,
+                eval_config=config.eval,
+                model_name=config.model.name,
+                sampling_config=config.eval.sampling,
+                teacher_context=config.teacher_model.context,
+                output_dir=config.output_dir,
+            )
+            logger.success("Context distillation baseline evaluation completed")
+        except Exception as e:
+            logger.warning(f"Context distillation baseline evaluation failed: {e}")
+
     while True:
         # Check if this run has been evicted by the trainer
         evicted_path = config.output_dir / "control" / "evicted.txt"
@@ -387,13 +410,31 @@ async def orchestrate(config: OrchestratorConfig):
         if config.teacher_model is not None:
             logger.info(f"Computing teacher logprobs for {len(train_examples)} training examples")
             teacher_logprobs_start_time = time.perf_counter()
-            teacher_logprobs_list = await compute_teacher_logprobs(
-                clients=teacher_clients,
-                model_name=teacher_model_name,
-                samples=train_examples,
-            )
-            for train_example, teacher_logprobs in zip(train_examples, teacher_logprobs_list):
-                train_example.teacher_logprobs = teacher_logprobs
+
+            if config.teacher_model.context is not None:
+                # Context distillation mode: teacher sees different (enhanced) prompt
+                logger.debug("Using context distillation mode for teacher logprobs")
+                teacher_logprobs_list = await compute_teacher_logprobs_with_context(
+                    clients=teacher_clients,
+                    model_name=teacher_model_name,
+                    samples=train_examples,
+                    tokenizer=tokenizer,
+                    teacher_context=config.teacher_model.context,
+                )
+                # Pad with zeros for prompt positions (teacher logprobs only cover completion)
+                for train_example, completion_logprobs in zip(train_examples, teacher_logprobs_list):
+                    prompt_logprobs = [0.0] * len(train_example.prompt_ids)
+                    train_example.teacher_logprobs = prompt_logprobs + completion_logprobs
+            else:
+                # Standard distillation: teacher sees same prompt as student
+                teacher_logprobs_list = await compute_teacher_logprobs(
+                    clients=teacher_clients,
+                    model_name=teacher_model_name,
+                    samples=train_examples,
+                )
+                for train_example, teacher_logprobs in zip(train_examples, teacher_logprobs_list):
+                    train_example.teacher_logprobs = teacher_logprobs
+
             teacher_logprobs_time = time.perf_counter() - teacher_logprobs_start_time
             logger.debug(f"Computed teacher logprobs in {teacher_logprobs_time:.2f}s")
 

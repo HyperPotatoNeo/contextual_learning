@@ -1,0 +1,169 @@
+# Context Distillation + Task Reward (Hybrid)
+# Run with: uv run rl @ experiments/context_distill/rl.toml
+#
+# This config demonstrates reverse-KL on-policy context distillation:
+# - Teacher model sees enhanced prompt (with additional context/instructions)
+# - Student model sees base prompt
+# - Reward = task_reward + teacher_kl (hybrid mode)
+#
+# GPU allocation (4 GPUs):
+#   GPU 0: Student inference (vLLM) - generates rollouts
+#   GPU 1: Teacher inference (vLLM) - computes teacher logprobs with context
+#   GPU 2-3: Trainer (FSDP2) - policy optimization
+#
+# Run with:
+#   uv run rl @ experiments/context_distill/rl.toml \
+#     --inference_gpu_ids 0 \
+#     --teacher_gpu_ids 1 \
+#     --trainer_gpu_ids 2 3
+
+# ============================================================================
+# Training
+# ============================================================================
+max_steps = 500
+seq_len = 4096              # Max sequence length (also micro batch token capacity)
+output_dir = "outputs/context_distill"
+
+# ============================================================================
+# Model
+# ============================================================================
+[model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+# ============================================================================
+# Checkpointing
+# ============================================================================
+[ckpt]
+interval = 50              # Save every N steps
+
+# ============================================================================
+# W&B Logging
+# ============================================================================
+[wandb]
+project = "sokoban-rl"
+name = "sokoban-context-distill"
+
+# ============================================================================
+# Trainer Config
+# ============================================================================
+[trainer.model]
+impl = "liger_kernel"       # Optimized kernels
+
+[trainer.model.ac]          # Activation checkpointing
+freq = 1
+
+[trainer.model.lora]        # LoRA settings
+rank = 16
+alpha = 64
+
+[trainer.optim]
+lr = 1e-5
+weight_decay = 0.0
+max_norm = 1.0              # Gradient clipping
+
+# Hybrid loss: combine task reward + teacher/student log prob terms
+# advantage = adv_tau * task_reward + teacher_tau * log(p_teacher) - student_tau * log(p_student)
+[trainer.loss]
+adv_tau = 0.5               # Weight for task reward
+teacher_tau = 0.5           # Weight for teacher log prob term (distillation signal)
+student_tau = 0.5           # Weight for student log prob term (entropy bonus)
+
+# ============================================================================
+# Orchestrator Config
+# ============================================================================
+[orchestrator]
+batch_size = 256            # Global batch size (total samples per step)
+rollouts_per_example = 8    # Rollouts per prompt
+
+[orchestrator.sampling]
+max_tokens = 4096           # Max generation tokens
+temperature = 1.0           # Sampling temperature
+
+# Teacher model config (same model, different prompt via context distillation)
+# The teacher sees the student prompt with additional context prepended.
+# This enables the student to learn to infer the behavior implied by the context.
+[orchestrator.teacher_model]
+context = """You are going to solve a 'sokoban' puzzle.
+## Symbol Legend
+* - The player
+% - The player standing on a goal
+@ - A box
+X - A goal (empty)
+$ - A box on a goal
++ - A wall
+- - An empty position
+## Rules
+1. The player can move in four directions: Up (U), Down (D), Left (L), Right (R)
+2. The player cannot move through walls (+)
+3. When the player moves into a box (@), the box is pushed in that same direction
+4. A box can only be pushed if the space behind it (in the direction of the push) is empty (-) or a goal (X)
+5. A box cannot be pushed through walls or other boxes
+6. The puzzle is solved when ALL boxes are on goals (all @ become $)
+## Solution Format
+Your solution must be ONLY a string of characters using: L, D, U, R
+Example: LDURRUDL
+IMPORTANT: Your final answer must contain ONLY the move string with no additional text, spaces, or formatting.
+## Strategy Guidelines
+1. First, carefully parse the grid and identify:
+   - Player position (* or % if on a goal)
+   - All box positions (@ or $ if already on a goal)
+   - All goal positions (X, or inferred from % and $)
+   - Wall layout (+)
+2. Plan your solution by determining:
+   - Which box should go to which goal
+   - The order in which to push boxes (avoid blocking yourself)
+   - The path the player needs to take to get into pushing position
+3. When pushing a box:
+   - The player must be on the opposite side of the box from the intended direction
+   - To push a box DOWN, the player must be ABOVE the box
+   - To push a box UP, the player must be BELOW the box
+   - To push a box LEFT, the player must be to the RIGHT of the box
+   - To push a box RIGHT, the player must be to the LEFT of the box
+4. Critical considerations:
+   - Avoid pushing boxes into corners unless that corner contains a goal
+   - Avoid pushing boxes against walls in ways that make them unreachable to goals
+   - Consider if the player can reach the required pushing position without moving through boxes
+   - Boxes already on goals ($) should typically not be moved
+5. Verify your solution by mentally tracing through each move:
+   - Track player position after each move
+   - Track box positions after each push
+   - Ensure no invalid moves (through walls or impossible pushes)
+   - Confirm all boxes end up on goals
+6. Look for the most efficient path - often you can find shorter routes by going around obstacles optimally.
+7. When outputting your answer, provide ONLY the move string (e.g., "RDLDR") with no additional explanation, no spaces between letters, and no other text.
+Given the puzzle, first reason through the solution step by step, then provide your final answer as ONLY the move string.
+"""
+# Set to true to run baseline eval before training (compares student vs teacher)
+eval_baseline = true
+
+# Environment (can be any env - this example uses Sokoban)
+[[orchestrator.env]]
+id = "sokoban-env"
+args = { num_train_examples = 5000, num_eval_examples = 250, seed = 42, min_w = 4, max_w = 8, min_h = 4, max_h = 8, min_boxes = 3, max_boxes = 8, max_depth = 80 }
+
+# ============================================================================
+# Inference Config
+# ============================================================================
+[inference]
+# gpu_memory_utilization = 0.9
+
+# ============================================================================
+# Eval Config
+# ============================================================================
+[orchestrator.eval]
+num_examples = 250
+rollouts_per_example = 1
+eval_base_model = false
+interval = 1000 # we dont need intermediate evals
+
+[orchestrator.eval.sampling]
+max_tokens = 4096
+temperature = 1.0
+
+[[orchestrator.eval.env]]
+id = "sokoban-env"
+args = { num_train_examples = 5000, num_eval_examples = 250, seed = 42, min_w = 4, max_w = 8, min_h = 4, max_h = 8, min_boxes = 3, max_boxes = 8, max_depth = 80 }
+
+
+# [inference.parallel]
+# tp = 1                    # Tensor parallelism for large models

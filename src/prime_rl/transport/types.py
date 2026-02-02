@@ -14,6 +14,7 @@ class TrainingSample(msgspec.Struct, array_like=True, gc=False, omit_defaults=Tr
     teacher_logprobs: list[float] | None = None
     advantage: float | None = None
     reward: float | None = None
+    prompt_text: str | None = None  # Original prompt text for context distillation
 
 
 class TrainingBatch(msgspec.Struct, array_like=True, gc=False, omit_defaults=True):

@@ -1,6 +1,6 @@
 
 max_steps = 200
-seq_len = 2048
+seq_len = 4096
 
 [ckpt] # Checkpoint at the end of training
 
@@ -29,11 +29,10 @@ batch_size = 512
 rollouts_per_example = 8
 
 [orchestrator.sampling]
-max_tokens = 768
+max_tokens = 4096
 
 [[orchestrator.env]]
-id = "primeintellect/alphabet-sort"
-name = "alphabet-sort"
-args = { min_turns = 3, max_turns = 5, power_per_turn = false }
+id = "rg-sokoban-env"
+args = { dataset_name = "sokoban", size = 2000, seed = 0, prompt_prefix = "Solve the puzzle and reason carefully.", prompt_suffix = "Final answer should be in <answer></answer> tags in the required format." }
 
 [inference] # Default inference config
