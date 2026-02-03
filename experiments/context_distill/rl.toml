@@ -56,6 +56,9 @@ freq = 1
 rank = 16
 alpha = 64
 
+[trainer.ckpt.weights]
+save_adapter_separately = true
+
 [trainer.optim]
 lr = 1e-5
 weight_decay = 0.0
