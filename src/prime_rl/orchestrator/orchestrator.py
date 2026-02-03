@@ -605,7 +605,7 @@ async def orchestrate(config: OrchestratorConfig):
         monitor.log(to_log)
 
         # Log samples to monitor(s) if enabled
-        subset_train_rollouts = random.sample(train_rollouts, min(8, len(train_rollouts)))
+        subset_train_rollouts = random.sample(train_rollouts, min(16, len(train_rollouts)))
         monitor.log_samples(subset_train_rollouts, step=progress.step)
 
         # Log distributions (rewards, advantages) if enabled

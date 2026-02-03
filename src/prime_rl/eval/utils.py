@@ -894,7 +894,7 @@ async def run_context_distillation_baseline_eval(
 
     This evaluates both:
     1. Student baseline: model without the teacher context (normal eval)
-    2. Teacher baseline: model with the teacher context prepended to prompts
+    2. Teacher baseline: model with the teacher context as system message
 
     The results are logged to help measure the effect of the context and track
     how well the student learns to internalize the teacher's behavior.
@@ -904,7 +904,7 @@ async def run_context_distillation_baseline_eval(
         eval_config: Evaluation configuration.
         model_name: Name of the model being evaluated.
         sampling_config: Sampling configuration for generation.
-        teacher_context: The context to prepend for teacher baseline.
+        teacher_context: System message content for teacher baseline.
         output_dir: Output directory for results.
 
     Returns:
@@ -936,17 +936,27 @@ async def run_context_distillation_baseline_eval(
         ) -> list[float]:
             eval_example = example
             if with_context:
-                # Create modified example with context prepended to user prompt
+                # Create modified example with teacher context as system message
                 eval_example = deepcopy(example)
                 if "prompt" in eval_example and eval_example["prompt"]:
                     if isinstance(eval_example["prompt"], str):
-                        eval_example["prompt"] = teacher_context + "\n\n" + eval_example["prompt"]
+                        # Convert string to chat format with system + user messages
+                        eval_example["prompt"] = [
+                            {"role": "system", "content": teacher_context},
+                            {"role": "user", "content": eval_example["prompt"]},
+                        ]
                     elif isinstance(eval_example["prompt"], list):
-                        # Handle chat format - find and modify the user message
-                        for msg in eval_example["prompt"]:
-                            if msg.get("role") == "user":
-                                msg["content"] = teacher_context + "\n\n" + msg.get("content", "")
-                                break
+                        # Handle chat format - replace or insert system message
+                        has_system = any(msg.get("role") == "system" for msg in eval_example["prompt"])
+                        if has_system:
+                            # Replace existing system message
+                            for msg in eval_example["prompt"]:
+                                if msg.get("role") == "system":
+                                    msg["content"] = teacher_context
+                                    break
+                        else:
+                            # Insert system message at beginning
+                            eval_example["prompt"].insert(0, {"role": "system", "content": teacher_context})
                 elif "task" in eval_example and eval_example["task"]:
                     eval_example["task"] = teacher_context + "\n\n" + eval_example["task"]
 
