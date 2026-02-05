@@ -58,6 +58,17 @@ class LossConfig(BaseConfig):
     ] = 0.0
     kl_tau: Annotated[float, Field(ge=0, description="The tau for KL divergence.")] = 0.0
 
+    # When True, the advantage already includes tau scaling and KL terms from orchestrator
+    # (i.e., orchestrator.advantage.use_full_reward_baseline was True)
+    # In this case, skip adv_tau scaling and per-token KL addition in loss computation
+    use_full_reward_baseline: Annotated[
+        bool,
+        Field(
+            description="If True, the advantage already includes tau scaling and sequence-level KL terms. "
+            "Skip adv_tau scaling and per-token KL addition. Auto-synced from orchestrator.advantage.use_full_reward_baseline."
+        ),
+    ] = False
+
     @model_validator(mode="after")
     def validate_mask_bounds(self):
         if self.token_mask_low >= self.token_mask_high:

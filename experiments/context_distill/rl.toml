@@ -78,6 +78,9 @@ student_tau = 0.5           # Weight for student log prob term (entropy bonus)
 batch_size = 256            # Global batch size (total samples per step)
 rollouts_per_example = 8    # Rollouts per prompt
 
+[orchestrator.advantage]
+use_full_reward_baseline = true 
+
 [orchestrator.sampling]
 max_tokens = 4096           # Max generation tokens
 temperature = 1.0           # Sampling temperature
@@ -86,55 +89,68 @@ temperature = 1.0           # Sampling temperature
 # The teacher sees the student prompt with additional context prepended.
 # This enables the student to learn to infer the behavior implied by the context.
 [orchestrator.teacher_model]
-context = """You are going to solve a 'sokoban' puzzle.
-## Symbol Legend
-* - The player
-% - The player standing on a goal
-@ - A box
-X - A goal (empty)
-$ - A box on a goal
-+ - A wall
-- - An empty position
-## Rules
-1. The player can move in four directions: Up (U), Down (D), Left (L), Right (R)
-2. The player cannot move through walls (+)
-3. When the player moves into a box (@), the box is pushed in that same direction
-4. A box can only be pushed if the space behind it (in the direction of the push) is empty (-) or a goal (X)
-5. A box cannot be pushed through walls or other boxes
-6. The puzzle is solved when ALL boxes are on goals (all @ become $)
-## Solution Format
-Your solution must be ONLY a string of characters using: L, D, U, R
-Example: LDURRUDL
-IMPORTANT: Your final answer must contain ONLY the move string with no additional text, spaces, or formatting.
-## Strategy Guidelines
-1. First, carefully parse the grid and identify:
-   - Player position (* or % if on a goal)
-   - All box positions (@ or $ if already on a goal)
-   - All goal positions (X, or inferred from % and $)
-   - Wall layout (+)
-2. Plan your solution by determining:
-   - Which box should go to which goal
-   - The order in which to push boxes (avoid blocking yourself)
-   - The path the player needs to take to get into pushing position
-3. When pushing a box:
-   - The player must be on the opposite side of the box from the intended direction
-   - To push a box DOWN, the player must be ABOVE the box
-   - To push a box UP, the player must be BELOW the box
-   - To push a box LEFT, the player must be to the RIGHT of the box
-   - To push a box RIGHT, the player must be to the LEFT of the box
-4. Critical considerations:
-   - Avoid pushing boxes into corners unless that corner contains a goal
-   - Avoid pushing boxes against walls in ways that make them unreachable to goals
-   - Consider if the player can reach the required pushing position without moving through boxes
-   - Boxes already on goals ($) should typically not be moved
-5. Verify your solution by mentally tracing through each move:
-   - Track player position after each move
-   - Track box positions after each push
-   - Ensure no invalid moves (through walls or impossible pushes)
-   - Confirm all boxes end up on goals
-6. Look for the most efficient path - often you can find shorter routes by going around obstacles optimally.
-7. When outputting your answer, provide ONLY the move string (e.g., "RDLDR") with no additional explanation, no spaces between letters, and no other text.
-Given the puzzle, first reason through the solution step by step, then provide your final answer as ONLY the move string.
+context = """Given the fields `question`, produce the fields `reasoning`, `answer`.
+
+You are solving Sokoban puzzles. Your goal is to find a sequence of moves (L=Left, R=Right, U=Up, D=Down) that places ALL boxes onto ALL goals.
+
+**Symbol Key:**
+- `*` - The player
+- `%` - The player standing on a goal
+- `@` - A box (not on a goal)
+- `X` - A goal (empty, no box on it)
+- `$` - A box on a goal
+- `+` - A wall
+- `-` - An empty position
+
+**Critical Rules:**
+1. The puzzle is solved when EVERY goal has a box on it. Count all goals (X, $, %) and all boxes (@, $) - they must match and all boxes must be on goals.
+2. A `$` means a box is already on a goal at that position - this is good, but there may be OTHER goals (X) that still need boxes.
+3. A `%` means the player is standing on a goal - that goal still needs a box pushed onto it.
+4. To push a box, the player must be adjacent to it and move INTO the box's cell. The box moves one cell in the same direction. The cell behind the box (in the push direction) must be empty (-) or a goal (X).
+5. Boxes cannot be pushed through walls or other boxes.
+6. The player cannot walk through walls or boxes.
+
+**Grid Parsing - CRITICAL:**
+- Parse the grid carefully, accounting for spacing. Each cell is typically separated by spaces.
+- Use 0-indexed coordinates: (row, column) where row 0 is the top row.
+- When the grid has spaces between characters, each character position corresponds to even indices (0, 2, 4...) when reading the raw line, OR simply parse by splitting on whitespace.
+
+**Solution Strategy:**
+1. First, carefully parse the grid and identify ALL positions of:
+   - Goals: cells with X, $, or % (these are goal positions)
+   - Boxes: cells with @ or $ (these are box positions)
+   - Player: cell with * or %
+2. Count goals and boxes - they should be equal.
+3. Identify which goals are empty (X or %) - these need boxes pushed to them.
+4. Plan moves to push boxes from non-goal positions (@) to empty goals.
+5. **IMPORTANT**: When planning a path, verify EACH move step-by-step:
+   - For each move, check what is in the destination cell
+   - If it's a wall (+), the move is invalid
+   - If it's a box (@ or $), you can only move there if you're pushing and the cell beyond the box is empty or a goal
+   - If it's empty (-) or goal (X), you can move there freely
+
+**Move Verification Process:**
+Before finalizing your answer, trace through EVERY move in your solution:
+1. Start with the initial player position
+2. For each move (L/R/U/D):
+   - Calculate the target cell
+   - Check if target is empty/goal → player moves there
+   - Check if target has a box → verify cell beyond box is empty/goal, then push occurs
+   - Check if target is wall → INVALID, find alternative
+3. After all moves, verify all goals have boxes
+
+**Common Mistakes to Avoid:**
+- Do NOT assume the puzzle is solved just because you see a `$`. There may be additional goals marked with `X` or `%` that still need boxes. Always count ALL goals and ALL boxes.
+- Do NOT miscalculate column positions - be very careful when parsing grids with spaces.
+- Do NOT write moves that push boxes into walls or other boxes.
+- Do NOT confuse the direction needed to push a box (to push a box UP, the player must be BELOW the box and move UP).
+- ALWAYS trace your solution move-by-move to verify it works before submitting.
+
+**Output Format:**
+- Provide your reasoning showing the grid analysis, positions identified, and move sequence logic.
+- Trace through your proposed solution step-by-step to verify each move is valid.
+- End with `<answer>MOVES</answer>` where MOVES is your solution string (e.g., `<answer>DRRRDLDLU</answer>`).
+- If the puzzle is already solved with no moves needed, output `<answer></answer>`.
 """
 # Set to true to run baseline eval before training (compares student vs teacher)
 eval_baseline = true

@@ -147,16 +147,22 @@ def compute_loss(
 
         importance_ratio = seq_importance_ratio if loss_config.ratio_type == "sequence" else token_importance_ratio
 
-        advantages = loss_config.adv_tau * advantages
-        if teacher_logprobs is not None:
-            # Separate weights for teacher log prob and student log prob (entropy) terms
-            # teacher_kl = teacher_logprobs - trainer_logprobs
-            # Split into: teacher_tau * teacher_logprobs - student_tau * trainer_logprobs
-            advantages = (
-                advantages
-                + loss_config.teacher_tau * teacher_logprobs.detach()
-                - loss_config.student_tau * trainer_logprobs.detach()
-            )
+        if loss_config.use_full_reward_baseline:
+            # Advantage already includes tau scaling and sequence-level KL terms from orchestrator
+            # Use it directly without additional scaling or per-token KL
+            pass
+        else:
+            # Original behavior: scale by adv_tau and add per-token KL terms
+            advantages = loss_config.adv_tau * advantages
+            if teacher_logprobs is not None:
+                # Separate weights for teacher log prob and student log prob (entropy) terms
+                # teacher_kl = teacher_logprobs - trainer_logprobs
+                # Split into: teacher_tau * teacher_logprobs - student_tau * trainer_logprobs
+                advantages = (
+                    advantages
+                    + loss_config.teacher_tau * teacher_logprobs.detach()
+                    - loss_config.student_tau * trainer_logprobs.detach()
+                )
         total_combined_advantage.append(_safe_mean(advantages, loss_mask))
         coeff = importance_ratio * (advantages - loss_config.kl_tau * log_importance_ratio)
         loss = -(coeff.detach() * trainer_logprobs)[keep_mask].sum()

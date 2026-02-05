@@ -368,6 +368,19 @@ class RLConfig(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def auto_setup_advantage_tau(self):
+        # Sync use_full_reward_baseline and tau values between orchestrator.advantage and trainer.loss
+        if self.orchestrator.advantage is not None and self.orchestrator.advantage.use_full_reward_baseline:
+            # Copy tau values from trainer.loss to orchestrator.advantage
+            self.orchestrator.advantage.adv_tau = self.trainer.loss.adv_tau
+            self.orchestrator.advantage.teacher_tau = self.trainer.loss.teacher_tau
+            self.orchestrator.advantage.student_tau = self.trainer.loss.student_tau
+            # Sync flag to trainer.loss so loss.py knows to skip tau scaling and per-token KL
+            self.trainer.loss.use_full_reward_baseline = True
+
+        return self
+
+    @model_validator(mode="after")
     def auto_setup_output_dir(self):
         # If specified, use the same outputs directory for trainer and orchestrator
         if self.output_dir is not None:

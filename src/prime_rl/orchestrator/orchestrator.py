@@ -381,32 +381,34 @@ async def orchestrate(config: OrchestratorConfig):
         generate_completions_time = time.perf_counter() - generate_completions_start_time
         train_rollouts = train_task.result()
 
-        # Compute advantages
-        rewards = [rollout["reward"] for rollout in train_rollouts]
-        completion_lens = [get_completion_len(rollout) for rollout in train_rollouts]
-        advantages = compute_advantages(
-            rewards,
-            completion_lens,
-            config.rollouts_per_example,
-            config.advantage,
+        # Check if we need full reward baseline (requires computing teacher logprobs before advantages)
+        use_full_reward_baseline = (
+            config.advantage is not None
+            and config.advantage.use_full_reward_baseline
+            and config.teacher_model is not None
         )
 
-        # Update and sample rollouts from the buffer
+        # Create train_examples from rollouts
         make_train_example = interleave_rollout if config.trajectory_strategy == "interleaved" else branch_rollout
         train_examples: list[TrainingSample] = []
-        for train_rollout, advantage in zip(train_rollouts, advantages):
+        rollout_to_example_indices: list[list[int]] = []  # Track which examples came from which rollout
+        for train_rollout in train_rollouts:
             train_example = make_train_example(train_rollout)
             if train_example is not None:
+                indices = list(range(len(train_examples), len(train_examples) + len(train_example)))
+                rollout_to_example_indices.append(indices)
                 for te in train_example:
-                    te.advantage = advantage
                     te.reward = train_rollout["reward"]
                 train_examples.extend(train_example)
+            else:
+                rollout_to_example_indices.append([])
         logger.debug(
             f"Converted {len(train_rollouts)} training rollouts to {len(train_examples)} training examples using {config.trajectory_strategy} strategy"
         )
 
         # Compute teacher logprobs if teacher model is configured
         teacher_logprobs_time = 0
+        teacher_logprobs_list: list[list[float]] | None = None
         if config.teacher_model is not None:
             logger.info(f"Computing teacher logprobs for {len(train_examples)} training examples")
             teacher_logprobs_start_time = time.perf_counter()
@@ -437,6 +439,54 @@ async def orchestrate(config: OrchestratorConfig):
 
             teacher_logprobs_time = time.perf_counter() - teacher_logprobs_start_time
             logger.debug(f"Computed teacher logprobs in {teacher_logprobs_time:.2f}s")
+
+        # Compute advantages
+        rewards = [rollout["reward"] for rollout in train_rollouts]
+        completion_lens = [get_completion_len(rollout) for rollout in train_rollouts]
+
+        if use_full_reward_baseline:
+            # For full reward baseline, we need teacher and inference logprobs per rollout
+            # Extract completion logprobs (inference logprobs) from train_examples
+            # Use the first example from each rollout (for interleaved, there's only one)
+            inference_logprobs_per_rollout: list[list[float]] = []
+            teacher_logprobs_per_rollout: list[list[float]] = []
+            for indices in rollout_to_example_indices:
+                if indices:
+                    # Get completion logprobs from the first train_example for this rollout
+                    example = train_examples[indices[0]]
+                    inference_logprobs_per_rollout.append(example.completion_logprobs)
+                    # Get teacher logprobs (completion portion only) for this rollout
+                    if example.teacher_logprobs is not None:
+                        # Teacher logprobs include prompt (zeros) + completion
+                        teacher_completion_lps = example.teacher_logprobs[len(example.prompt_ids) :]
+                        teacher_logprobs_per_rollout.append(teacher_completion_lps)
+                    else:
+                        teacher_logprobs_per_rollout.append([0.0] * len(example.completion_logprobs))
+                else:
+                    # Rollout produced no examples, use empty lists
+                    inference_logprobs_per_rollout.append([])
+                    teacher_logprobs_per_rollout.append([])
+
+            advantages = compute_advantages(
+                rewards,
+                completion_lens,
+                config.rollouts_per_example,
+                config.advantage,
+                teacher_logprobs=teacher_logprobs_per_rollout,
+                inference_logprobs=inference_logprobs_per_rollout,
+            )
+        else:
+            advantages = compute_advantages(
+                rewards,
+                completion_lens,
+                config.rollouts_per_example,
+                config.advantage,
+            )
+
+        # Assign advantages to train_examples
+        for rollout_idx, indices in enumerate(rollout_to_example_indices):
+            for idx in indices:
+                train_examples[idx].advantage = advantages[rollout_idx]
 
         training_batch = TrainingBatch(
             examples=train_examples,
@@ -605,7 +655,7 @@ async def orchestrate(config: OrchestratorConfig):
         monitor.log(to_log)
 
         # Log samples to monitor(s) if enabled
-        subset_train_rollouts = random.sample(train_rollouts, min(16, len(train_rollouts)))
+        subset_train_rollouts = random.sample(train_rollouts, min(8, len(train_rollouts)))
         monitor.log_samples(subset_train_rollouts, step=progress.step)
 
         # Log distributions (rewards, advantages) if enabled

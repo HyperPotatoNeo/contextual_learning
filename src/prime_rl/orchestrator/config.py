@@ -606,6 +606,23 @@ class BufferConfig(BaseConfig):
 class AdvantageConfig(BaseConfig):
     length_weighted_mean: bool = False
 
+    # Full reward baseline: include teacher/student logprobs in baseline computation
+    # When enabled, baseline = mean(adv_tau * task_reward + teacher_tau * sum(teacher_lp) - student_tau * sum(student_lp))
+    # instead of just mean(task_reward)
+    use_full_reward_baseline: Annotated[
+        bool,
+        Field(
+            description="If True, compute baseline using the full reward signal including teacher/student logprobs. "
+            "The baseline becomes: mean(adv_tau * task_reward + teacher_tau * sum(teacher_logprobs) - student_tau * sum(inference_logprobs)). "
+            "Requires teacher_model to be configured. The tau values are automatically copied from trainer.loss config."
+        ),
+    ] = False
+    # These tau values are automatically populated from trainer.loss config by RLConfig validator
+    # Do not set these manually in the config - they will be overwritten
+    adv_tau: Annotated[float, Field(ge=0, description="Auto-populated from trainer.loss.adv_tau")] = 1.0
+    teacher_tau: Annotated[float, Field(ge=0, description="Auto-populated from trainer.loss.teacher_tau")] = 0.0
+    student_tau: Annotated[float, Field(ge=0, description="Auto-populated from trainer.loss.student_tau")] = 0.0
+
 
 class FileSystemWeightBroadcastConfig(BaseModel):
     """Configures the filesystem weight broadcast."""
