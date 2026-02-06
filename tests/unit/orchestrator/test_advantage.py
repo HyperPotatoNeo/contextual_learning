@@ -223,6 +223,8 @@ class TestRLConfigTauSync:
         assert config.orchestrator.advantage.adv_tau == 0.3
         assert config.orchestrator.advantage.teacher_tau == 0.4
         assert config.orchestrator.advantage.student_tau == 0.5
+        # Trainer flag should also be True
+        assert config.trainer.loss.use_full_reward_baseline is True
 
     def test_tau_values_not_synced_when_full_reward_baseline_disabled(self):
         """When use_full_reward_baseline is False, tau values should remain at defaults."""
@@ -249,3 +251,5 @@ class TestRLConfigTauSync:
         assert config.orchestrator.advantage.adv_tau == 1.0
         assert config.orchestrator.advantage.teacher_tau == 0.0
         assert config.orchestrator.advantage.student_tau == 0.0
+        # Trainer flag should also be synced to False
+        assert config.trainer.loss.use_full_reward_baseline is False

@@ -67,7 +67,7 @@ class LossConfig(BaseConfig):
             description="If True, the advantage already includes tau scaling and sequence-level KL terms. "
             "Skip adv_tau scaling and per-token KL addition. Auto-synced from orchestrator.advantage.use_full_reward_baseline."
         ),
-    ] = False
+    ] = True
 
     @model_validator(mode="after")
     def validate_mask_bounds(self):

@@ -377,6 +377,9 @@ class RLConfig(BaseSettings):
             self.orchestrator.advantage.student_tau = self.trainer.loss.student_tau
             # Sync flag to trainer.loss so loss.py knows to skip tau scaling and per-token KL
             self.trainer.loss.use_full_reward_baseline = True
+        else:
+            # Ensure trainer.loss flag is synced when orchestrator disables full reward baseline
+            self.trainer.loss.use_full_reward_baseline = False
 
         return self
 
