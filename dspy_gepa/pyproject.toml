@@ -1,0 +1,22 @@
+[project]
+name = "dspy-gepa-sokoban"
+version = "0.1.0"
+description = "GEPA prompt optimization for Sokoban using DSPy"
+requires-python = ">=3.10"
+dependencies = [
+    "dspy>=2.6.0",
+    "torch>=2.0",
+    "vllm>=0.6.0",
+    "transformers>=4.40.0",
+    "datasets>=3.0.0",
+    "verifiers",
+    "wandb",
+    "rich",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv.sources]
+verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", rev = "209774a" }

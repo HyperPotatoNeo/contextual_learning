@@ -1,0 +1,32 @@
+{
+  "config": {
+    "prompt_file": "/pscratch/sd/s/siddart2/dspy_gepa/best_prompt_run8.txt",
+    "model": "Qwen/Qwen3-4B-Instruct-2507",
+    "api_base": "http://localhost:8000/v1",
+    "num_examples": 512,
+    "seed": 22,
+    "max_tokens": 8192,
+    "temperature": 1.0,
+    "concurrency": 32,
+    "methods": [
+      "prime_rl_student",
+      "prime_rl_teacher"
+    ]
+  },
+  "results": {
+    "prime_rl_student": {
+      "accuracy": 0.474609375,
+      "correct": 243,
+      "total": 512,
+      "errors": 0,
+      "no_answer_tags": 101
+    },
+    "prime_rl_teacher": {
+      "accuracy": 0.5625,
+      "correct": 288,
+      "total": 512,
+      "errors": 0,
+      "no_answer_tags": 104
+    }
+  }
+}

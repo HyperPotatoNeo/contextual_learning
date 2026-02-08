@@ -112,6 +112,7 @@ def compute_loss(
     total_geo_masked_high = []
     total_geo_seq_ratio = []
     total_teacher_kl = []
+    total_teacher_seq_kl = []
     total_combined_advantage = []
 
     if teacher_logprobs is None:
@@ -186,6 +187,7 @@ def compute_loss(
         total_geo_seq_ratio.append(geo_seq_ratio)
         if teacher_logprobs is not None:
             total_teacher_kl.append(_safe_mean(teacher_kl, loss_mask))
+            total_teacher_seq_kl.append(teacher_kl[loss_mask].sum().detach())
 
     # Apply loss scaling
     scaled_loss = total_loss / loss_scale
@@ -206,4 +208,6 @@ def compute_loss(
     }
     if total_teacher_kl:
         result["teacher_kl"] = torch.stack(total_teacher_kl)
+    if total_teacher_seq_kl:
+        result["teacher_seq_kl"] = torch.stack(total_teacher_seq_kl)
     return scaled_loss, result
