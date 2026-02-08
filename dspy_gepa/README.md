@@ -108,6 +108,82 @@ Four critical bugs were discovered and fixed during development. **All fixes are
 
 See `PROGRESS_NOTES.md` for full details on all 15 lessons learned.
 
+## API Keys & Environment Variables
+
+Two API keys are needed:
+
+| Variable | Purpose | Where to set |
+|----------|---------|--------------|
+| `ANTHROPIC_API_KEY` | Claude reflection model (GEPA uses Claude Opus to propose prompt improvements) | Pass via `--anthropic-api-key` flag, or set as env var (DSPy reads `ANTHROPIC_API_KEY` automatically) |
+| `WANDB_API_KEY` | Weights & Biases logging (optional) | Set as env var before running the script |
+
+**Example:**
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+export WANDB_API_KEY="..."  # optional
+
+# Then run GEPA
+./run_gepa_opus_v7.sh
+```
+
+The vLLM student model does not need an API key (`api_key="dummy"` is used for the local server).
+
+## Bugs Fixed to Get GEPA Working
+
+Getting DSPy GEPA to produce correct results required fixing 4 critical bugs across 7 runs. Each bug silently degraded accuracy without raising errors, making them hard to detect.
+
+### Bug 1: DSPy Adapter Not Actually Used (Run 3)
+
+**Symptom**: Set `lm.adapter = PrimeRLAdapter()` but the model still produced short ChatAdapter-style responses with `[[ ## answer ## ]]` markers instead of reasoning.
+
+**Root cause**: DSPy's `Predict.forward()` reads the adapter from `dspy.settings.adapter`, not from `lm.adapter`. Setting it on the LM instance is silently ignored.
+
+**Fix**: Use `dspy.configure(lm=student_lm, adapter=PrimeRLAdapter())` to set the adapter globally.
+
+**Impact**: ChatAdapter format caused Qwen3-4B to skip reasoning entirely (23 tokens avg vs 5000+ tokens with raw format), dropping accuracy from ~37% to ~13%.
+
+### Bug 2: Dataset Index Mismatch (Run 4)
+
+**Symptom**: Standalone eval showed 50% accuracy but GEPA baseline showed 12.5% on the "same" task.
+
+**Root cause**: `verifiers.ReasoningGymEnv` creates a combined dataset of `5000 + N` items and uses indices `5000..5000+N` for evaluation. Direct `rg.create_dataset("sokoban", size=N)` uses indices `0..N`. These produce completely different puzzles — the high-index ones happened to be harder.
+
+**Fix**: Changed `load_datasets()` to use `rg.create_dataset()` directly instead of going through `verifiers.ReasoningGymEnv`.
+
+### Bug 3: DSPy Disk Cache Returning Stale Results (Run 5)
+
+**Symptom**: Baseline accuracy dropped to 12% despite all previous fixes being in place.
+
+**Root cause**: DSPy caches all LM responses in `$HOME/.dspy_cache/` (a SQLite database via `diskcache.FanoutCache`). Even at `temperature > 0`, DSPy caches the first stochastic sample and returns the exact same response for identical requests in subsequent runs. Previous debug scripts had cached bad responses for the same prompts.
+
+**Fix**: Clear the cache in the shell script *before* Python starts:
+```bash
+rm -rf "$HOME/.dspy_cache"
+mkdir -p "$HOME/.dspy_cache"
+```
+Cannot clear in Python — DSPy opens the database on `import dspy`, so deleting it after import causes "unable to open database file" errors.
+
+### Bug 4: GEPA `with_instructions()` Breaks Adapter Routing (Run 6)
+
+**Symptom**: Baseline test showed 34% (correct) but GEPA's internal evaluations showed 13.5% (wrong). GEPA was optimizing prompts while evaluating them in the wrong format.
+
+**Root cause**: GEPA's `build_program()` calls `signature.with_instructions(new_prompt)` which creates a *new* signature class with `__name__ = "StringSignature"` instead of `"SokobanSolver"`. The PrimeRLAdapter was checking `__name__` to decide raw vs ChatAdapter format, so after `with_instructions()` it silently fell back to ChatAdapter.
+
+**Fix**: Changed `_is_raw_format_signature()` to check field names (`{"question"} -> {"answer"}`) instead of `__name__`, since field structure is preserved through `with_instructions()`.
+
+### Timeline
+
+| Run | Bugs present | Val accuracy | Status |
+|-----|-------------|-------------|--------|
+| 1-2 | Adapter not used, wrong dataset | 13-20% | Wrong format |
+| 3 | Adapter set on LM (ignored) | 12.6% | Bug 1 discovered |
+| 4 | Wrong dataset indices | 12.5% | Bug 2 discovered |
+| 5 | Stale cache | 12% | Bug 3 discovered |
+| 6 | `with_instructions()` breaks adapter | 13.5% val, 34% baseline | Bug 4 discovered |
+| 7 | All fixed | **38%** | First correct run |
+
+See `PROGRESS_NOTES.md` for the full investigation log with evidence and 15 lessons learned.
+
 ## References
 
 - [DSPy Documentation](https://dspy.ai/)
