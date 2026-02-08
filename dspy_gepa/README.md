@@ -184,6 +184,29 @@ Cannot clear in Python — DSPy opens the database on `import dspy`, so deleting
 
 See `PROGRESS_NOTES.md` for the full investigation log with evidence and 15 lessons learned.
 
+### Extracting the Optimized Prompt
+
+GEPA-optimized prompts can be very long (the Run 8 best prompt is 102 lines). Grepping the log file only gives you a few lines, not the full prompt. To extract the complete prompt, use Python:
+
+```python
+import dspy
+
+# Load the saved optimized program
+program = dspy.SokobanProgram()
+program.load("outputs/gepa_<timestamp>/optimized_program.json")
+print(program.solver.signature.instructions)
+```
+
+Or extract from the GEPA state directly:
+```python
+import pickle
+with open("outputs/gepa_<timestamp>/gepa_logs/gepa_state.bin", "rb") as f:
+    state = pickle.load(f)
+# Inspect state for Pareto front programs and their instructions
+```
+
+The script also saves the best prompt to `outputs/gepa_<timestamp>/system_prompt.txt` automatically if the run completes.
+
 ## References
 
 - [DSPy Documentation](https://dspy.ai/)
