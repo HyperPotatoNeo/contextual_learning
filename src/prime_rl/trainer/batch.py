@@ -22,6 +22,9 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
     # computed via prefill in the orchestrator when a teacher model is configured
     teacher_logprobs = training_example.teacher_logprobs
 
+    # KL gates: per-token broadcast of the sample's kl_gate scalar
+    kl_gates = [training_example.kl_gate] * len(input_ids) if training_example.kl_gate is not None else None
+
     if len(input_ids) > seq_len:
         input_ids = input_ids[:seq_len]
         loss_mask = loss_mask[:seq_len]
@@ -31,6 +34,8 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
         temperatures = temperatures[:seq_len]
         if teacher_logprobs is not None:
             teacher_logprobs = teacher_logprobs[:seq_len]
+        if kl_gates is not None:
+            kl_gates = kl_gates[:seq_len]
 
     assert (
         len(input_ids)
@@ -44,6 +49,8 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
     )
     if teacher_logprobs is not None:
         assert len(teacher_logprobs) == len(input_ids), f"teacher_logprobs: {len(teacher_logprobs)}"
+    if kl_gates is not None:
+        assert len(kl_gates) == len(input_ids), f"kl_gates: {len(kl_gates)}"
     return MicroBatch(
         input_ids=input_ids,
         advantages=advantages,
@@ -51,6 +58,7 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
         position_ids=position_ids,
         inference_logprobs=inference_logprobs,
         teacher_logprobs=teacher_logprobs,
+        kl_gates=kl_gates,
         temperatures=temperatures,
     )
 
@@ -82,6 +90,10 @@ def packed_samples_into_micro_bs(
                     if bin_content.teacher_logprobs is None:
                         bin_content.teacher_logprobs = []
                     bin_content.teacher_logprobs.extend(sample.teacher_logprobs)
+                if sample.kl_gates is not None:
+                    if bin_content.kl_gates is None:
+                        bin_content.kl_gates = []
+                    bin_content.kl_gates.extend(sample.kl_gates)
                 bin_content.position_ids.extend(sample.position_ids)
                 bin_content.lora_num_tokens[idx] += len(sample.input_ids)
                 break
@@ -118,6 +130,8 @@ def pad_micro_batch(micro_batch: MicroBatch, pad_to_multiple_of: int) -> MicroBa
     micro_batch.temperatures.extend([1.0] * padding_size)
     if micro_batch.teacher_logprobs is not None:
         micro_batch.teacher_logprobs.extend([0.0] * padding_size)
+    if micro_batch.kl_gates is not None:
+        micro_batch.kl_gates.extend([1.0] * padding_size)
     micro_batch.lora_num_tokens[-1] += (
         padding_size  # We send padding to the last lora so that tokens have ascending lora idx
     )

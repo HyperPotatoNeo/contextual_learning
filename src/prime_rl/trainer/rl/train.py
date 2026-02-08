@@ -308,6 +308,7 @@ def train(config: RLTrainerConfig):
             teacher_logprobs = (
                 micro_batch["teacher_logprobs"].to("cuda") if micro_batch["teacher_logprobs"] is not None else None
             )
+            kl_gates = micro_batch["kl_gates"].to("cuda") if micro_batch["kl_gates"] is not None else None
 
             labels = shift_tensor_left(input_ids)
 
@@ -377,6 +378,7 @@ def train(config: RLTrainerConfig):
                 else None,
                 advantages=advantages.squeeze().split(response_lengths),
                 loss_mask=loss_mask.squeeze().split(response_lengths),
+                kl_gates=kl_gates.squeeze().split(response_lengths) if kl_gates is not None else None,
                 loss_config=config.loss,
                 loss_scale=loss_scale,
             )

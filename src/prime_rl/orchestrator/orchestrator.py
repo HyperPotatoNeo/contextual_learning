@@ -4,7 +4,7 @@ import time
 
 import tomli_w
 
-from prime_rl.orchestrator.advantage import compute_advantages
+from prime_rl.orchestrator.advantage import compute_advantages, compute_kl_gates
 from prime_rl.orchestrator.event_loop_lag import EventLoopLagMonitor
 from prime_rl.orchestrator.patches import monkey_patch_chat_completion_logprobs, monkey_patch_oai_iterable_types
 from prime_rl.orchestrator.trajectories import branch_rollout, interleave_rollout
@@ -483,10 +483,17 @@ async def orchestrate(config: OrchestratorConfig):
                 config.advantage,
             )
 
-        # Assign advantages to train_examples
+        # Compute KL gates if kl_only_incorrect is enabled
+        kl_gates = None
+        if config.advantage is not None and config.advantage.kl_only_incorrect:
+            kl_gates = compute_kl_gates(rewards, config.rollouts_per_example)
+
+        # Assign advantages (and kl_gates) to train_examples
         for rollout_idx, indices in enumerate(rollout_to_example_indices):
             for idx in indices:
                 train_examples[idx].advantage = advantages[rollout_idx]
+                if kl_gates is not None:
+                    train_examples[idx].kl_gate = kl_gates[rollout_idx]
 
         training_batch = TrainingBatch(
             examples=train_examples,

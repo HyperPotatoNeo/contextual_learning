@@ -136,29 +136,75 @@ return (input_keys, output_keys) == (frozenset({"question"}), frozenset({"answer
 |---------|-----------|-----------|--------|
 | 0 | baseline | **37%** (74/200) | Original SokobanSolver docstring (generic reasoning + `<answer>` format) |
 | 1 | 6 | 16% (32/200) | "You are going to solve a 'sokoban' puzzle. Your goal is to push all boxes onto all goal positions." |
-| 2 | 10 | **38%** (76/200) | **"You are going to solve a 'sokoban' puzzle."** |
-| 3 | 14 | 36.5% (73/200) | Long detailed Sokoban strategy prompt (symbol legend, rules, strategy, ~80 lines) |
+| 2 | 10 | **38%** (76/200) | Medium-length Sokoban prompt (~40 lines): symbols, rules, movement clarification, solving strategy, critical instructions |
+| 3 | 14 | 36.5% (73/200) | Longer detailed Sokoban strategy prompt (~80 lines) |
 
-**Best single program**: Program 2 at 38% — simple one-liner
+**Best single program**: Program 2 at 38% — structured prompt with concise rules and strategy
 **Pareto front aggregate**: **55.5%** (111/200) — best across all 4 programs per example
 
 ### Best GEPA-Optimized Prompt (Program 2)
 
 ```
 You are going to solve a 'sokoban' puzzle.
+
+SYMBOLS:
+* - The player
+% - The player on a goal
+@ - A box
+X - A goal
+$ - A box on a goal
++ - A wall
+- - An empty position
+
+RULES:
+- The player can move Up (U), Down (D), Left (L), or Right (R).
+- The player can push a box by moving into it, but ONLY if the cell on the opposite side of the box (in the direction of movement) is empty (-) or a goal (X). The box moves one cell in that direction.
+- The player CANNOT pull boxes, only push them.
+- The player CANNOT push two boxes at once.
+- The player CANNOT walk through walls (+) or boxes (@/$).
+- The goal is to place ALL boxes onto goal positions (every X must have a box on it).
+
+KEY MOVEMENT CLARIFICATION:
+- To push a box LEFT, the player must be to the RIGHT of the box and move LEFT.
+- To push a box RIGHT, the player must be to the LEFT of the box and move RIGHT.
+- To push a box UP, the player must be BELOW the box and move UP.
+- To push a box DOWN, the player must be ABOVE the box and move DOWN.
+
+SOLVING STRATEGY:
+1. First, parse the grid carefully. Identify exact coordinates (row, col) for the player, all boxes, all goals, and all walls.
+2. Count boxes and goals - they must match. Note which boxes are already on goals ($).
+3. Plan which box goes to which goal. Consider accessibility and avoid creating deadlocks (boxes pushed into corners or against walls where they can never reach a goal).
+4. Work backwards from the goals: think about what direction each box needs to be pushed from to land on its goal, and whether the player can reach the required pushing position.
+5. Be very careful about the order of operations - pushing one box may block the path for another. Push boxes that are farther from the player or in more constrained positions first when possible.
+6. Avoid pushing boxes into corners (where two walls meet) unless that corner is a goal - this creates an unsolvable state.
+7. Verify each move step by step: after each move, update the player position and any box positions. Confirm the move is legal before proceeding.
+
+CRITICAL INSTRUCTIONS:
+- Keep your reasoning CONCISE. Do not exhaustively explore every dead end. Plan first, then execute.
+- OUTPUT YOUR ANSWER EARLY. Before running out of space, provide your answer.
+- Your solution must be a string of characters using only U, D, L, R (e.g., LDURRUDL).
+- You MUST format your final answer as: <answer>MOVES</answer>
+- Double-check your move sequence by mentally simulating it on the grid before submitting.
+- If you find yourself going in circles or your analysis is getting very long, stop, pick your best solution so far, and submit it in the <answer> tags immediately.
 ```
 
-This replaces the original multi-line docstring with a simple task identifier.
-The 1% improvement (37% → 38%) is within noise at temperature=1.0.
+This is a well-structured ~40-line prompt with symbol definitions, rules, movement clarification,
+solving strategy, and critical output instructions. It is notably shorter and more focused than
+Program 3 (~80 lines) but longer than the baseline docstring. GEPA evolved it to include
+the key information (symbols, push mechanics, answer format) while keeping it concise enough
+to avoid excessive token consumption.
 
-### Key Insight: Prompt Length Hurts Performance
+The 1% improvement (37% → 38%) is within noise at temperature=1.0, but the prompt structure
+is qualitatively different from both the baseline and Program 3.
 
-Program 3 (the detailed strategy prompt, ~80 lines) scored **lower** (36.5%) than the
-simple one-liner (38%) despite containing explicit Sokoban rules, strategy tips, and
-common mistakes. The reason: the long system prompt consumes tokens from the 8192-token
-budget, causing more responses to be truncated before producing `<answer>` tags.
-The model already knows how to solve Sokoban from its training — it doesn't need
-instructions about the rules.
+### Key Insight: Prompt Length vs Structure
+
+Program 3 (~80 lines) scored **lower** (36.5%) than Program 2 (~40 lines, 38%).
+Both contain Sokoban rules and strategy, but Program 2 is more concise and focused.
+The longer prompt consumes more tokens from the 8192-token budget, causing more
+responses to be truncated before producing `<answer>` tags. GEPA discovered
+that a medium-length structured prompt outperforms both the minimal baseline
+and the verbose strategy guide.
 
 ### High Stochastic Variance at Temperature=1.0
 
@@ -235,11 +281,14 @@ on performance.** The model's reasoning ability (and whether it can finish reaso
 ### Recommended System Prompt for prime-rl Context Distillation
 
 Use either:
-1. **Simple**: `"You are going to solve a 'sokoban' puzzle."` (GEPA's best, 38%)
+1. **GEPA's best (Program 2)**: Structured ~40-line prompt with symbols, rules, movement clarification,
+   solving strategy, and answer format instructions (38%)
 2. **Original**: The default verifiers system prompt (baseline, 37%)
 
-Both perform equivalently within noise. The simple prompt is shorter and leaves more
-tokens for reasoning.
+Both perform equivalently within noise. The GEPA prompt is more concise and focused than the
+200-line teacher context currently in rl.toml, while including the key structural elements
+(symbol legend, push mechanics, answer format). See the full prompt in the "Best GEPA-Optimized
+Prompt" section above.
 
 ### What Would Help More Than Prompt Optimization
 
@@ -287,9 +336,10 @@ To continue, you would need to:
     original program directly, while GEPA's evaluations go through `build_program()`.
     If `build_program()` changes something (like signature identity), the baseline test
     may pass while GEPA's evaluations silently break.
-13. **Longer prompts can hurt performance**: With fixed max_tokens, a longer system prompt
-    leaves fewer tokens for reasoning. GEPA's most detailed prompt (80 lines of strategy)
-    scored lower (36.5%) than a simple one-liner (38%). The model already knows the task.
+13. **Prompt length sweet spot matters**: GEPA's most detailed prompt (80 lines) scored lower
+    (36.5%) than the medium-length structured prompt (~40 lines, 38%). The best prompt includes
+    concise rules and strategy but avoids excessive verbosity. With fixed max_tokens, overly
+    long system prompts leave fewer tokens for reasoning.
 14. **GEPA Pareto aggregate is misleading for single-prompt tasks**: The Pareto front
     aggregate (55.5%) represents an oracle that picks the best program per-example.
     For context distillation where you need one prompt, only the best single program

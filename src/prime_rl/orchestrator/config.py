@@ -606,6 +606,16 @@ class BufferConfig(BaseConfig):
 class AdvantageConfig(BaseConfig):
     length_weighted_mean: bool = False
 
+    kl_only_incorrect: Annotated[
+        bool,
+        Field(
+            description="If True, KL regularization terms are gated by (1 - group_task_reward_mean). "
+            "KL is fully active for all-incorrect groups (mean=0), inactive for all-correct groups (mean=1), "
+            "and soft-gated for mixed groups. Applies to both sequence-level KL in advantage computation "
+            "and per-token KL in loss computation."
+        ),
+    ] = False
+
     # Full reward baseline: include teacher/student logprobs in baseline computation
     # When enabled, baseline = mean(adv_tau * task_reward + teacher_tau * sum(teacher_lp) - student_tau * sum(student_lp))
     # instead of just mean(task_reward)

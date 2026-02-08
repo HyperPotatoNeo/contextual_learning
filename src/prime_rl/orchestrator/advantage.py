@@ -3,6 +3,19 @@ import torch
 from prime_rl.orchestrator.config import AdvantageConfig
 
 
+def compute_kl_gates(rewards: list[float], samples_per_problem: int) -> list[float]:
+    """Compute per-sample KL gates based on group task reward mean.
+
+    Returns (1 - group_mean) for each sample, where group_mean is the mean task reward
+    of all samples in the same problem group. This gates KL terms so they are only active
+    when the group lacks task reward signal.
+    """
+    rewards_tensor = torch.tensor(rewards).view(-1, samples_per_problem)
+    group_mean = rewards_tensor.mean(dim=1, keepdim=True)
+    kl_gate = (1 - group_mean).expand_as(rewards_tensor)
+    return kl_gate.flatten().tolist()
+
+
 def compute_advantages(
     rewards: list[float],
     completion_lengths: list[int],
@@ -34,12 +47,15 @@ def compute_advantages(
         teacher_sums = torch.tensor([sum(lp) for lp in teacher_logprobs]).view(-1, samples_per_problem)
         inference_sums = torch.tensor([sum(lp) for lp in inference_logprobs]).view(-1, samples_per_problem)
 
-        # Full reward: adv_tau * task_reward + teacher_tau * sum(teacher_lp) - student_tau * sum(inference_lp)
-        full_rewards = (
-            advantage_config.adv_tau * rewards_tensor
-            + advantage_config.teacher_tau * teacher_sums
-            - advantage_config.student_tau * inference_sums
-        )
+        kl_terms = advantage_config.teacher_tau * teacher_sums - advantage_config.student_tau * inference_sums
+
+        # Gate KL terms by (1 - group_task_mean) when kl_only_incorrect is enabled
+        if advantage_config.kl_only_incorrect:
+            group_task_mean = rewards_tensor.mean(dim=1, keepdim=True)
+            kl_terms = (1 - group_task_mean) * kl_terms
+
+        # Full reward: adv_tau * task_reward + (gated) KL terms
+        full_rewards = advantage_config.adv_tau * rewards_tensor + kl_terms
     else:
         full_rewards = rewards_tensor
 

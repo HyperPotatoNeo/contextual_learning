@@ -23,12 +23,16 @@ python -m vllm.entrypoints.openai.api_server \
 | Program | Val Score (200 ex) | Prompt |
 |---------|-------------------|--------|
 | 0 (baseline) | 37% | Generic reasoning prompt with `<answer>` format |
-| 2 (best) | **38%** | `"You are going to solve a 'sokoban' puzzle."` |
-| 3 | 36.5% | Detailed 80-line strategy prompt |
+| 2 (best) | **38%** | Structured ~40-line prompt: symbols, rules, movement clarification, strategy, answer format |
+| 3 | 36.5% | Longer ~80-line detailed strategy prompt |
 
 **Pareto aggregate**: 55.5% (oracle across all programs per example)
 
-**Conclusion**: For Sokoban with Qwen3-4B at temperature=1.0, the system prompt has minimal impact on performance. The model's reasoning ability within the 8192-token budget is the bottleneck, not the prompt.
+**Note**: The best prompt (Program 2) is NOT a one-liner. It is a structured ~40-line prompt
+with symbol definitions, rules, push mechanics, solving strategy, and answer format instructions.
+See `PROGRESS_NOTES.md` for the full prompt text, or extract from the GEPA state file (see below).
+
+**Conclusion**: For Sokoban with Qwen3-4B at temperature=1.0, prompt structure matters more than length. The medium-length structured prompt (38%) outperformed both the baseline and the verbose 80-line guide (36.5%). The model's reasoning ability within the 8192-token budget remains the primary bottleneck.
 
 ## Architecture
 
@@ -81,6 +85,8 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
 
+# Use the full GEPA-optimized prompt from PROGRESS_NOTES.md (Program 2)
+# or a simple fallback:
 SYSTEM_PROMPT = "You are going to solve a 'sokoban' puzzle."
 
 response = client.chat.completions.create(

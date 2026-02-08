@@ -80,8 +80,9 @@ def compute_loss(
     teacher_logprobs: Any | None,  # list of Float[Tensor, "seq_i"] with potentially different seq_i lengths, or None
     advantages: Any,  # list of Float[Tensor, "seq_i"] with potentially different seq_i lengths
     loss_mask: Any,  # list of Bool[Tensor, "seq_i"] with potentially different seq_i lengths
-    loss_config: LossConfig,
-    loss_scale: int,
+    kl_gates: Any | None = None,  # list of Float[Tensor, "seq_i"] for kl_only_incorrect gating, or None
+    loss_config: LossConfig = LossConfig(),
+    loss_scale: int = 1,
 ) -> tuple[Float[Tensor, ""], dict[str, Any]]:
     """
     Compute loss for packed sequences (batch size = 1, multiple sequences packed along sequence dimension).
@@ -117,9 +118,11 @@ def compute_loss(
 
     if teacher_logprobs is None:
         teacher_logprobs = [None] * len(trainer_logprobs)
+    if kl_gates is None:
+        kl_gates = [None] * len(trainer_logprobs)
 
-    for trainer_logprobs, inference_logprobs, teacher_logprobs, advantages, loss_mask in zip(
-        trainer_logprobs, inference_logprobs, teacher_logprobs, advantages, loss_mask
+    for trainer_logprobs, inference_logprobs, teacher_logprobs, advantages, loss_mask, kl_gates in zip(
+        trainer_logprobs, inference_logprobs, teacher_logprobs, advantages, loss_mask, kl_gates
     ):
         log_importance_ratio = trainer_logprobs - inference_logprobs
         teacher_kl = teacher_logprobs - trainer_logprobs if teacher_logprobs is not None else None
@@ -159,11 +162,14 @@ def compute_loss(
                 # Separate weights for teacher log prob and student log prob (entropy) terms
                 # teacher_kl = teacher_logprobs - trainer_logprobs
                 # Split into: teacher_tau * teacher_logprobs - student_tau * trainer_logprobs
-                advantages = (
-                    advantages
-                    + loss_config.teacher_tau * teacher_logprobs.detach()
+                kl_terms = (
+                    loss_config.teacher_tau * teacher_logprobs.detach()
                     - loss_config.student_tau * trainer_logprobs.detach()
                 )
+                # Gate KL terms by (1 - group_task_mean) when kl_only_incorrect is enabled
+                if kl_gates is not None:
+                    kl_terms = kl_gates * kl_terms
+                advantages = advantages + kl_terms
         total_combined_advantage.append(_safe_mean(advantages, loss_mask))
         coeff = importance_ratio * (advantages - loss_config.kl_tau * log_importance_ratio)
         loss = -(coeff.detach() * trainer_logprobs)[keep_mask].sum()
