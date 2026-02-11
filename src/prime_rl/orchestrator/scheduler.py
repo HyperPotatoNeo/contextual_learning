@@ -17,7 +17,7 @@ from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.config import EnvConfig, OrchestratorConfig
 from prime_rl.orchestrator.env_worker import EnvWorker, WorkerDiedError
 from prime_rl.orchestrator.utils import get_sampling_args
-from prime_rl.utils.client import InferencePool
+from prime_rl.utils.client import InferencePool, update_weights
 from prime_rl.utils.config import ClientConfig
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.pathing import get_env_worker_log_file
@@ -62,6 +62,8 @@ class Scheduler:
         inference_pool: InferencePool,
         lora_name: str | None = None,
         output_dir: Path | None = None,
+        teacher_admin_clients: list | None = None,
+        teacher_lora_name: str | None = None,
     ):
         self.logger = get_logger()
         self.client_config = client_config
@@ -81,6 +83,10 @@ class Scheduler:
 
         # Inference pool - used for admin operations (adapter sync) and metrics
         self.inference_pool = inference_pool
+
+        # Teacher admin clients - used to sync teacher weights with trainer (when share_teacher_weights=True)
+        self.teacher_admin_clients = teacher_admin_clients
+        self.teacher_lora_name = teacher_lora_name
 
         # Build example lookup dicts per env (example_id -> example)
         self.example_lookups: dict[str, dict[int, dict]] = {}
@@ -222,10 +228,19 @@ class Scheduler:
                 f"Got new policy with step {next_ckpt_step}. Updating weights and cancelling old rollout requests."
             )
 
-            # Update weights on inference servers
+            # Update weights on inference servers (and teacher if shared)
             update_weights_start_time = time.perf_counter()
             weights_path = get_step_path(get_broadcast_dir(self.config.output_dir), next_ckpt_step)
-            await self.inference_pool.update_weights(weights_path, lora_name=self.lora_name, step=next_ckpt_step)
+            update_coros = [
+                self.inference_pool.update_weights(weights_path, lora_name=self.lora_name, step=next_ckpt_step)
+            ]
+            if self.teacher_admin_clients is not None:
+                update_coros.append(
+                    update_weights(
+                        self.teacher_admin_clients, weights_path, lora_name=self.teacher_lora_name, step=next_ckpt_step
+                    )
+                )
+            await asyncio.gather(*update_coros)
             self.update_weights_time = time.perf_counter() - update_weights_start_time
             self.logger.debug(f"Updated weights to step {next_ckpt_step} in {self.update_weights_time:.2f}s")
 

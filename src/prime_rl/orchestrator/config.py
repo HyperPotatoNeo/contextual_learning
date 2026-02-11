@@ -684,6 +684,15 @@ class TeacherModelConfig(BaseConfig):
         ),
     ] = False
 
+    share_teacher_weights: Annotated[
+        bool,
+        Field(
+            description="If True, the teacher model weights are periodically updated from the trainer "
+            "at the same frequency as the inference model (controlled by max_async_level). "
+            "When False (default), the teacher stays frozen at its initial weights."
+        ),
+    ] = False
+
 
 class OrchestratorConfig(BaseSettings):
     """Configures the orchestrator for RL training."""

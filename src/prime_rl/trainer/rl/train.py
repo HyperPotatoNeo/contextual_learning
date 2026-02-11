@@ -148,6 +148,7 @@ def train(config: RLTrainerConfig):
             list(model.named_parameters()),
             parallel_dims,
             lora=config.model.lora is not None,
+            lora_config=config.model.lora,
         )
         scheduler = setup_scheduler(optimizer, config.scheduler, config.max_steps, config.optim.lr)
     else:

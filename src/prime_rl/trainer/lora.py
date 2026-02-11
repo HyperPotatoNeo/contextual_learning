@@ -112,17 +112,26 @@ def freeze_all_except_lora_and_specified(model: nn.Module, config: LoRAConfig) -
     """
     Freeze all parameters except LoRA adapters and specified trainable modules.
 
+    Uses named_modules() + direct params instead of named_parameters() to handle
+    tied weights (e.g., lm_head.weight tied to embed_tokens.weight). named_parameters()
+    deduplicates tied params and only returns one name, which may not match the
+    modules_to_save pattern.
+
     Args:
         model: The model to freeze parameters in
         config: LoRA configuration with modules_to_save patterns
     """
-    for name, param in model.named_parameters():
-        if any(lora_param in name for lora_param in ["lora_A", "lora_B"]):
-            param.requires_grad = True
-        elif _should_keep_trainable(name, config.modules_to_save):
-            param.requires_grad = True
-        else:
-            param.requires_grad = False
+    trainable_ids: set[int] = set()
+    for module_name, module in model.named_modules():
+        for param_name, param in module.named_parameters(recurse=False):
+            full_name = f"{module_name}.{param_name}" if module_name else param_name
+            if any(lora_param in full_name for lora_param in ["lora_A", "lora_B"]):
+                trainable_ids.add(id(param))
+            elif _should_keep_trainable(full_name, config.modules_to_save):
+                trainable_ids.add(id(param))
+
+    for param in model.parameters():
+        param.requires_grad = id(param) in trainable_ids
 
 
 def apply_lora_to_model(model: nn.Module, config: LoRAConfig) -> None:
@@ -234,6 +243,98 @@ def clean_lora_state_dict(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torc
     return clean_state_dict
 
 
+_MOE_PROJ_TO_WEIGHT = {"gate_proj": "w1", "down_proj": "w2", "up_proj": "w3"}
+
+
+def merge_lora_into_state_dict(
+    base_state_dict: dict[str, torch.Tensor],
+    lora_state_dict: dict[str, torch.Tensor],
+    scaling: float,
+) -> dict[str, torch.Tensor]:
+    """Merge per-run LoRA adapter weights into base model state dict.
+
+    Computes merged_weight = base_weight + scaling * (lora_B @ lora_A) for each
+    LoRA-adapted layer. Supports both Linear and MoE (GroupedExperts) modules.
+
+    Args:
+        base_state_dict: Clean base model state dict (no LoRA keys).
+            Modified in-place — caller should save originals for reverting.
+        lora_state_dict: Per-run adapter state dict from get_state_dict_for_run().
+        scaling: LoRA scaling factor (alpha / rank).
+
+    Returns:
+        Dict mapping modified keys to their original tensors (for reverting after save).
+    """
+    originals: dict[str, torch.Tensor] = {}
+
+    # Group LoRA keys by (prefix, lora_type) to find A/B pairs
+    lora_pairs: dict[str, dict[str, torch.Tensor]] = {}  # prefix -> {"lora_A": tensor, "lora_B": tensor}
+    moe_lora: dict[
+        str, dict[int, dict[str, dict[str, torch.Tensor]]]
+    ] = {}  # prefix -> {expert_id -> {proj -> {"lora_A": tensor, "lora_B": tensor}}}
+
+    for key, value in lora_state_dict.items():
+        # Linear LoRA: {prefix}.lora_A.weight / {prefix}.lora_B.weight
+        if key.endswith(".lora_A.weight"):
+            prefix = key[: -len(".lora_A.weight")]
+            lora_pairs.setdefault(prefix, {})["lora_A"] = value
+        elif key.endswith(".lora_B.weight"):
+            prefix = key[: -len(".lora_B.weight")]
+            lora_pairs.setdefault(prefix, {})["lora_B"] = value
+        else:
+            # MoE LoRA: {prefix}.{expert_id}.{proj}.lora_A.weight
+            for proj_name in _MOE_PROJ_TO_WEIGHT:
+                if f".{proj_name}.lora_A.weight" in key:
+                    # Extract: everything before .{expert_id}.{proj}.lora_A.weight
+                    suffix = f".{proj_name}.lora_A.weight"
+                    before_proj = key[: key.index(suffix)]
+                    # before_proj = {prefix}.{expert_id}
+                    dot_idx = before_proj.rfind(".")
+                    prefix = before_proj[:dot_idx]
+                    expert_id = int(before_proj[dot_idx + 1 :])
+                    moe_lora.setdefault(prefix, {}).setdefault(expert_id, {}).setdefault(proj_name, {})["lora_A"] = (
+                        value
+                    )
+                    break
+                elif f".{proj_name}.lora_B.weight" in key:
+                    suffix = f".{proj_name}.lora_B.weight"
+                    before_proj = key[: key.index(suffix)]
+                    dot_idx = before_proj.rfind(".")
+                    prefix = before_proj[:dot_idx]
+                    expert_id = int(before_proj[dot_idx + 1 :])
+                    moe_lora.setdefault(prefix, {}).setdefault(expert_id, {}).setdefault(proj_name, {})["lora_B"] = (
+                        value
+                    )
+                    break
+
+    # Merge Linear LoRA pairs
+    for prefix, pair in lora_pairs.items():
+        base_key = f"{prefix}.weight"
+        if base_key not in base_state_dict:
+            continue
+        lora_A = pair["lora_A"]  # [rank, in_features]
+        lora_B = pair["lora_B"]  # [out_features, rank]
+        originals[base_key] = base_state_dict[base_key]
+        base_state_dict[base_key] = base_state_dict[base_key] + scaling * (lora_B @ lora_A)
+
+    # Merge MoE LoRA
+    for prefix, experts in moe_lora.items():
+        for proj_name, weight_name in _MOE_PROJ_TO_WEIGHT.items():
+            base_key = f"{prefix}.{weight_name}"
+            if base_key not in base_state_dict:
+                continue
+            if base_key not in originals:
+                originals[base_key] = base_state_dict[base_key].clone()
+            for expert_id, proj_data in experts.items():
+                if proj_name not in proj_data:
+                    continue
+                lora_A = proj_data[proj_name]["lora_A"]  # [rank, dim]
+                lora_B = proj_data[proj_name]["lora_B"]  # [hidden_dim, rank]
+                base_state_dict[base_key][expert_id] += scaling * (lora_B @ lora_A)
+
+    return originals
+
+
 def save_lora_config(config: LoRAConfig, model: nn.Module, save_path) -> None:
     """
     Save LoRA configuration as JSON for adapter portability.
@@ -250,17 +351,11 @@ def save_lora_config(config: LoRAConfig, model: nn.Module, save_path) -> None:
 
     # Extract actual target modules from the model
     target_modules = set()
-    modules_to_save = set()
 
     for name, module in model.named_modules():
         if isinstance(module, MultiLoRAModule):
             module_suffix = name.split(".")[-1]
             target_modules.add(module_suffix)
-
-    for name, param in model.named_parameters():
-        if param.requires_grad and "lora_A" not in name and "lora_B" not in name:
-            module_name = name.rsplit(".", 1)[0].split(".")[-1]
-            modules_to_save.add(module_name)
 
     adapter_config = {
         "peft_type": "LORA",
@@ -271,7 +366,6 @@ def save_lora_config(config: LoRAConfig, model: nn.Module, save_path) -> None:
         "lora_dropout": config.dropout,
         "bias": "none",
         "target_modules": sorted(list(target_modules)),
-        "modules_to_save": sorted(list(modules_to_save)) if modules_to_save else None,
     }
 
     config_path = save_path / "adapter_config.json"

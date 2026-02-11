@@ -13,9 +13,10 @@
 #
 # Run with:
 #   uv run rl @ experiments/context_distill/rl.toml \
-#     --inference_gpu_ids 0 \
-#     --teacher_gpu_ids 1 \
-#     --trainer_gpu_ids 2 3
+#     --inference_gpu_ids 0,1 \
+#     --teacher_gpu_ids 2 \
+#     --trainer_gpu_ids 3 \
+#     --inference.parallel.dp 2
 
 # ============================================================================
 # Training
@@ -60,15 +61,16 @@ impl = "liger_kernel"       # Optimized kernels
 freq = 1
 
 [trainer.model.lora]        # LoRA settings
-rank = 16
+rank = 32
 alpha = 64
+train_lm_head = true
 
 [trainer.ckpt.weights]
 save_adapter_separately = true
 
 [trainer.optim]
 lr = 1e-5
-betas1 = 0.85
+betas1 = 0.9
 betas2 = 0.9
 weight_decay = 0.0
 max_norm = 1.0              # Gradient clipping

@@ -44,6 +44,7 @@ from prime_rl.utils.client import (
     setup_admin_clients,
     setup_clients,
     setup_inference_pool,
+    update_weights,
 )
 from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.logger import intercept_verifiers_logging, setup_logger
@@ -170,6 +171,13 @@ async def orchestrate(config: OrchestratorConfig):
         else:
             checkpoint_step = config.ckpt.resume_step
 
+    # Determine if teacher weights should be synced with trainer
+    share_teacher_weights = (
+        config.teacher_model is not None
+        and config.teacher_model.share_teacher_weights
+        and teacher_admin_clients is not None
+    )
+
     scheduler = Scheduler(
         client_config=config.client,
         env_configs=config.env,
@@ -182,9 +190,11 @@ async def orchestrate(config: OrchestratorConfig):
         lora_name=config.model.lora.name if config.model.lora else None,
         output_dir=config.output_dir,
         inference_pool=inference_pool,
+        teacher_admin_clients=teacher_admin_clients if share_teacher_weights else None,
+        teacher_lora_name=config.model.lora.name if config.model.lora and share_teacher_weights else None,
     )
 
-    if checkpoint_step is not None and config.model.lora is not None:
+    if checkpoint_step is not None and config.model.lora is not None and config.model.lora.name is not None:
         scheduler.model_name = config.model.lora.name
         for workers in scheduler.workers.values():
             for worker in workers:
@@ -239,6 +249,8 @@ async def orchestrate(config: OrchestratorConfig):
         weights_path = get_weight_dir(config.output_dir, scheduler.ckpt_step, check_exists=check_exists)
         lora_name = config.model.lora.name if config.model.lora else None
         await inference_pool.update_weights(weights_path, lora_name=lora_name, step=scheduler.ckpt_step)
+        if share_teacher_weights:
+            await update_weights(teacher_admin_clients, weights_path, lora_name=lora_name, step=scheduler.ckpt_step)
     else:
         if config.reload_weights_on_start:
             if config.model.lora is None:

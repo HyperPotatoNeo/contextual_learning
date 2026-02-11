@@ -124,6 +124,30 @@ class LoRAConfig(BaseConfig):
         ),
     ] = []
 
+    train_lm_head: Annotated[
+        bool,
+        Field(
+            description="Whether to train the lm_head (final projection layer) fully alongside LoRA. "
+            "When True, lm_head is added to modules_to_save automatically.",
+        ),
+    ] = False
+
+    lm_head_lr_scale: Annotated[
+        float,
+        Field(
+            ge=0,
+            le=1,
+            description="Learning rate multiplier for lm_head relative to the base optimizer lr. "
+            "Only used when train_lm_head is True.",
+        ),
+    ] = 0.1
+
+    @model_validator(mode="after")
+    def auto_add_lm_head_to_modules_to_save(self):
+        if self.train_lm_head and "lm_head" not in self.modules_to_save:
+            self.modules_to_save = [*self.modules_to_save, "lm_head"]
+        return self
+
 
 class ModelConfig(BaseConfig):
     """Configures the model for training."""

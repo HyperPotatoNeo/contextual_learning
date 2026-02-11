@@ -7,7 +7,7 @@ import torch.nn as nn
 from torch.distributed.tensor import DTensor
 
 from prime_rl.trainer.config import LoRAConfig
-from prime_rl.trainer.lora import save_lora_config
+from prime_rl.trainer.lora import merge_lora_into_state_dict, save_lora_config
 from prime_rl.trainer.models import PreTrainedModelPrimeRL
 from prime_rl.trainer.rl.broadcast.base import WeightBroadcast
 from prime_rl.trainer.rl.config import FileSystemWeightBroadcastConfig
@@ -29,7 +29,9 @@ class FileSystemWeightBroadcast(WeightBroadcast):
     ):
         super().__init__(output_dir, lora_config)
         self.save_format: Literal["safetensors", "torch"] = config.save_format
-        self.save_sharded = config.save_sharded if lora_config is None else False
+        # Full model broadcast (no LoRA or merged LoRA) can be sharded; adapter-only must be unsharded
+        merged_broadcast = lora_config is not None and lora_config.train_lm_head
+        self.save_sharded = config.save_sharded if (lora_config is None or merged_broadcast) else False
         self.world = get_world()
         self.multi_run_manager = get_multi_run_manager()
         self.logger.debug(
@@ -40,12 +42,13 @@ class FileSystemWeightBroadcast(WeightBroadcast):
         """Broadcast weights by saving a HF-compatible checkpoint to shared filesystem and notifies the orchestrator."""
         self.logger.debug("Starting broadcasting weights to inference engine via shared filesystem")
         start_time = time.perf_counter()
-        adapter_only = self.lora_config is not None
+        adapter_only = self.lora_config is not None and not self.lora_config.train_lm_head
+        merged_broadcast = self.lora_config is not None and self.lora_config.train_lm_head
 
+        # Gather full base weights once for full-model or merged broadcasts.
+        # For merged broadcast, this includes the trained lm_head but strips LoRA params.
         if not adapter_only:
             state_dict = gather_weights_on_master(model, is_master=self.world.is_master)
-            if isinstance(model, PreTrainedModelPrimeRL) and model.is_prime_state_dict(state_dict):
-                model.convert_to_hf(state_dict)
 
         for idx in self.multi_run_manager.ready_to_update_idxs:
             self.logger.debug(
@@ -62,8 +65,19 @@ class FileSystemWeightBroadcast(WeightBroadcast):
                     if self.world.is_master:
                         state_dict[key] = value.to("cpu", non_blocking=False)
 
+            if merged_broadcast:
+                # Gather per-run LoRA adapter weights for merging into base.
+                # All ranks must participate in DTensor gathering.
+                lora_state = self.multi_run_manager.get_state_dict_for_run(idx)
+                for key, value in lora_state.items():
+                    if isinstance(value, DTensor):
+                        value = value.full_tensor()
+                    if self.world.is_master:
+                        lora_state[key] = value.to("cpu", non_blocking=False)
+
             # TODO: Broadcast ready to update in sync, then we dont need to gather on not ready
             if self.world.is_master:
+                originals = None
                 try:
                     save_dir = get_step_path(
                         get_broadcast_dir(self.multi_run_manager.get_run_dir(idx)),
@@ -71,8 +85,25 @@ class FileSystemWeightBroadcast(WeightBroadcast):
                     )
                     save_dir.mkdir(parents=True, exist_ok=True)
 
+                    if merged_broadcast:
+                        # Merge per-run LoRA into base weights before saving
+                        scaling = self.multi_run_manager.scaling_factors[idx].item()
+                        originals = merge_lora_into_state_dict(state_dict, lora_state, scaling)
+                        # Always shallow copy: save_state_dict destroys the dict when
+                        # save_sharded=True, and convert_to_hf renames keys in-place.
+                        # Either would corrupt the shared state_dict for subsequent runs.
+                        save_dict = dict(state_dict)
+                        if isinstance(model, PreTrainedModelPrimeRL) and model.is_prime_state_dict(state_dict):
+                            model.convert_to_hf(save_dict)
+                    elif not adapter_only:
+                        if isinstance(model, PreTrainedModelPrimeRL) and model.is_prime_state_dict(state_dict):
+                            model.convert_to_hf(state_dict)
+                        save_dict = state_dict
+                    else:
+                        save_dict = state_dict
+
                     self.logger.debug(f"Saving weights for run {idx} to {save_dir}")
-                    save_state_dict(state_dict, save_dir, self.save_format, self.save_sharded, adapter=adapter_only)
+                    save_state_dict(save_dict, save_dir, self.save_format, self.save_sharded, adapter=adapter_only)
                     if adapter_only:
                         save_lora_config(self.lora_config, model, save_dir)
 
@@ -89,6 +120,10 @@ class FileSystemWeightBroadcast(WeightBroadcast):
                     self.logger.error(f"Error broadcasting weights for run {idx}: {e}")
                 finally:
                     self.multi_run_manager.ready_to_update[idx] = False
+                    # Revert merged LoRA deltas so base_state is clean for next run
+                    if originals is not None:
+                        for key, orig_value in originals.items():
+                            state_dict[key] = orig_value
 
         if self.world.is_master:
             self.logger.debug(f"Weights broadcasted in {time.perf_counter() - start_time:.2f}s")

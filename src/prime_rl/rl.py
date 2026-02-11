@@ -436,11 +436,18 @@ class RLConfig(BaseSettings):
             if self.trainer.weight_broadcast.type == "nccl":
                 raise ValueError("NCCL weight broadcast does not support LoRA yet.")
 
-            # Ensure orchestrator has LoRA config
+            # Ensure orchestrator has LoRA config (needed for rank/alpha/scaling_factors)
             if self.orchestrator.model.lora is None:
                 from prime_rl.orchestrator.config import LoRAConfig
 
                 self.orchestrator.model.lora = LoRAConfig()
+
+            # When train_lm_head is enabled, broadcast merged full-model weights
+            # instead of LoRA adapters. Keep lora.name=None so orchestrator uses
+            # /update_weights (full model path) instead of /load_lora_adapter.
+            # Don't enable vLLM LoRA adapter support since we're not loading adapters.
+            if self.trainer.model.lora.train_lm_head:
+                return self
 
             # Auto-generate name if not provided
             if self.orchestrator.model.lora.name is None:

@@ -5,7 +5,7 @@ from dion import Muon
 from torch import nn
 from torch.optim import SGD, AdamW, Optimizer
 
-from prime_rl.trainer.config import OptimizerConfigType
+from prime_rl.trainer.config import LoRAConfig, OptimizerConfigType
 from prime_rl.trainer.parallel_dims import ParallelDims
 from prime_rl.trainer.runs import get_multi_run_manager
 from prime_rl.trainer.world import get_world
@@ -17,6 +17,7 @@ def setup_optimizer(
     named_params: list[tuple[str, nn.Parameter]],
     parallel_dims: ParallelDims,
     lora: bool = False,
+    lora_config: LoRAConfig | None = None,
 ) -> Optimizer:
     if lora:
         # Wait for run 0 to be created in the multi run manager
@@ -30,7 +31,22 @@ def setup_optimizer(
             multi_run_manager.synchronize_state()
             logger.info(f"Waiting for run 0 to be created {multi_run_manager.id_2_idx=}")
             time.sleep(1)
+
+        # Collect non-LoRA trainable params (e.g., modules_to_save like lm_head)
+        extra_trainable = [
+            (n, p) for n, p in named_params if p.requires_grad and "lora_A" not in n and "lora_B" not in n
+        ]
+        extra_param_groups = None
+        if extra_trainable:
+            scale = lora_config.lm_head_lr_scale if lora_config else 1.0
+            extra_param_groups = [{"params": [p for _, p in extra_trainable], "lr": config.lr * scale}]
+            logger.info(
+                f"Including {len(extra_trainable)} modules_to_save params in optimizer "
+                f"(lr={config.lr * scale:.2e}, scale={scale})"
+            )
+
         named_params = multi_run_manager.get_named_parameters_for_run(0)
+        return _create_optimizer(config, named_params, parallel_dims, extra_param_groups=extra_param_groups)
 
     return _create_optimizer(config, named_params, parallel_dims)
 
@@ -40,14 +56,23 @@ def _create_optimizer(
     named_params: list[tuple[str, nn.Parameter]],
     parallel_dims: ParallelDims,
     lr: float | None = None,
+    extra_param_groups: list[dict] | None = None,
 ) -> Optimizer:
-    """Create optimizer. If lr is None, uses config.lr."""
+    """Create optimizer. If lr is None, uses config.lr.
+
+    Args:
+        extra_param_groups: Additional param groups (e.g., modules_to_save with scaled lr).
+            Each dict should have "params" and optionally "lr". Only supported for adamw/sgd.
+    """
     if lr is None:
         lr = config.lr
+    params: list = [p for _, p in named_params]
+    if extra_param_groups:
+        params = [{"params": params}] + extra_param_groups
     match config.type:
         case "sgd":
             return SGD(
-                params=[p for _, p in named_params],
+                params=params,
                 lr=lr,
                 weight_decay=config.weight_decay,
                 momentum=config.momentum,
@@ -55,12 +80,14 @@ def _create_optimizer(
             )
         case "adamw":
             return AdamW(
-                params=[p for _, p in named_params],
+                params=params,
                 lr=lr,
                 weight_decay=config.weight_decay,
                 betas=(config.betas1, config.betas2),
             )
         case "muon":
+            if extra_param_groups:
+                raise ValueError("extra_param_groups (modules_to_save) not supported with Muon optimizer yet")
             return _create_muon_optimizer(config, named_params, parallel_dims, lr)
 
 
