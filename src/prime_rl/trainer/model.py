@@ -293,6 +293,10 @@ def load_dcp_from_hf(model: nn.Module, config: ModelConfig, parallel_dims: Paral
     snapshot_state_dict = load_state_dict(snapshot_path)
     model_state_dict = model.state_dict()
 
+    # Check if lm_head.weight exists in the snapshot BEFORE format conversion
+    # (format conversion may consume the dict, and lm_head.weight key is not renamed)
+    snapshot_has_lm_head = "lm_head.weight" in snapshot_state_dict
+
     # Dynamically convert between different weight formats if needed
     if isinstance(model, PreTrainedModelPrimeRL):
         if model.is_hf_state_dict(snapshot_state_dict) and model.is_prime_state_dict(model_state_dict):
@@ -332,12 +336,29 @@ def load_dcp_from_hf(model: nn.Module, config: ModelConfig, parallel_dims: Paral
     load_dcp_start_time = time.perf_counter()
     state_dict = model.state_dict()
     state_dict = strip_lora_from_state_dict(state_dict)
+
+    # Handle lm_head.weight loading:
+    # - If model has tied weights: skip lm_head (it's the same tensor as embed_tokens)
+    # - If model has untied weights (e.g. train_lm_head forced untying) but the base
+    #   checkpoint was saved with tied weights: skip lm_head and copy from embed_tokens after
+    init_lm_head_from_embed = False
     if model.config.tie_word_embeddings:
         del state_dict["lm_head.weight"]
+    elif "lm_head.weight" in state_dict and not snapshot_has_lm_head:
+        logger.info("Base checkpoint has tied lm_head; will initialize lm_head from embed_tokens after loading")
+        del state_dict["lm_head.weight"]
+        init_lm_head_from_embed = True
+
     dcp_load(
         state_dict,
         storage_reader=HuggingFaceStorageReader(path=snapshot_path.as_posix()),
     )
+
+    if init_lm_head_from_embed:
+        logger.info("Copying embed_tokens weights to lm_head (initializing untied lm_head)")
+        with torch.no_grad():
+            model.lm_head.weight.copy_(model.model.embed_tokens.weight)
+
     _init_buffers_post_meta()
 
     _move_buffers_to_cuda(model, config)
@@ -478,6 +499,18 @@ def setup_model(
         lm_head_chunk_size = config.fused_lm_head_chunk_size
 
     inject_prime_lm_head(model, chunk_size=lm_head_chunk_size)
+
+    # Untie lm_head from embed_tokens when train_lm_head is enabled.
+    # Without this, lm_head.weight and embed_tokens.weight share the same tensor,
+    # so training lm_head also modifies embeddings (defeating the purpose).
+    # Must happen before LoRA (for correct freeze/trainable detection) and before
+    # FSDP (which uses tie_word_embeddings to decide sharding strategy).
+    if config.lora is not None and config.lora.train_lm_head and model.config.tie_word_embeddings:
+        logger.info("Untying lm_head from embed_tokens (train_lm_head=True requires separate weights)")
+        model.config.tie_word_embeddings = False
+        if hasattr(model, "_tied_weights_keys"):
+            model._tied_weights_keys = [k for k in model._tied_weights_keys if k != "lm_head.weight"]
+        model.lm_head.weight = nn.Parameter(torch.empty_like(model.lm_head.weight))
 
     # Apply LoRA before FSDP setup
     if config.lora is not None:

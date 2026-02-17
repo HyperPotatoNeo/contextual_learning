@@ -31,8 +31,10 @@ from prime_rl.utils.pydantic_config import BaseSettings, get_temp_toml_file, par
 from prime_rl.utils.utils import (
     get_broadcast_dir,
     get_free_port,
+    get_latest_ckpt_step,
     get_log_dir,
     get_rollout_dir,
+    get_weights_dir,
 )
 from prime_rl.utils.validation import (
     validate_shared_ckpt_config,
@@ -537,6 +539,90 @@ class RLConfig(BaseSettings):
         return self
 
 
+def _prepare_untied_model_dir(model_name: str, output_dir: Path) -> Path:
+    """Create a model directory with tie_word_embeddings=False for vLLM.
+
+    When train_lm_head=True, vLLM must start with untied lm_head/embed_tokens so
+    that weight updates can load them as separate tensors. This creates a directory
+    that symlinks all files from the original model but overrides config.json.
+
+    If the base model has tied weights (no lm_head.weight in checkpoint), we also
+    create a small safetensors shard containing lm_head.weight copied from
+    embed_tokens.weight, and update the index accordingly.
+    """
+    from huggingface_hub import snapshot_download
+
+    # Resolve original model path
+    if Path(model_name).exists():
+        source_dir = Path(model_name)
+    else:
+        source_dir = Path(snapshot_download(repo_id=model_name, repo_type="model"))
+
+    target_dir = output_dir / "inference_model_untied"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if we need to create lm_head.weight (base model has tied weights)
+    index_path = source_dir / "model.safetensors.index.json"
+    needs_lm_head = False
+    if index_path.exists():
+        with open(index_path) as f:
+            index_data = json.load(f)
+        needs_lm_head = "lm_head.weight" not in index_data.get("weight_map", {})
+
+    # Files we'll write ourselves (don't symlink these)
+    skip_files = {"config.json"}
+    if needs_lm_head:
+        skip_files.add("model.safetensors.index.json")
+
+    # Symlink all files we're not overriding
+    for item in source_dir.iterdir():
+        target_item = target_dir / item.name
+        if target_item.exists() or target_item.is_symlink():
+            target_item.unlink()
+        if item.name not in skip_files:
+            target_item.symlink_to(item)
+
+    # Write modified config.json with tie_word_embeddings=False
+    config_path = source_dir / "config.json"
+    with open(config_path) as f:
+        model_config = json.load(f)
+    model_config["tie_word_embeddings"] = False
+    with open(target_dir / "config.json", "w") as f:
+        json.dump(model_config, f, indent=2)
+
+    # Create lm_head.weight from embed_tokens.weight if needed
+    if needs_lm_head:
+        import safetensors.torch
+
+        weight_map = index_data["weight_map"]
+        embed_shard = weight_map.get("model.embed_tokens.weight")
+        if embed_shard is None:
+            raise ValueError(f"Cannot create untied lm_head: model.embed_tokens.weight not found in {index_path}")
+
+        # Load embed_tokens.weight from its shard
+        shard_path = source_dir / embed_shard
+        tensors = safetensors.torch.load_file(str(shard_path), device="cpu")
+        embed_weight = tensors["model.embed_tokens.weight"]
+
+        # Save as a new small shard
+        lm_head_shard = "lm_head_untied.safetensors"
+        safetensors.torch.save_file(
+            {"lm_head.weight": embed_weight},
+            str(target_dir / lm_head_shard),
+        )
+
+        # Update index to include lm_head.weight
+        weight_map["lm_head.weight"] = lm_head_shard
+        with open(target_dir / "model.safetensors.index.json", "w") as f:
+            json.dump(index_data, f, indent=2)
+
+        import logging
+
+        logging.info(f"Created lm_head.weight ({embed_weight.shape}) from embed_tokens.weight in {lm_head_shard}")
+
+    return target_dir
+
+
 def cleanup_threads(threads: list[Thread]):
     for thread in threads:
         thread.join(timeout=5)
@@ -618,8 +704,47 @@ def rl(config: RLConfig):
     stop_events: dict[str, Event] = {}
 
     try:
+        # When resuming with train_lm_head, check for existing weight checkpoints
+        # so vLLM starts with trained weights instead of base model weights.
+        # Without this, the first rollouts after resume use untrained lm_head weights
+        # until the trainer broadcasts its first update.
+        resume_weights_path = None
+        if (
+            config.trainer.model.lora is not None
+            and config.trainer.model.lora.train_lm_head
+            and config.ckpt is not None
+            and config.ckpt.resume_step is not None
+        ):
+            weights_dir = get_weights_dir(config.output_dir)
+            latest_step = get_latest_ckpt_step(weights_dir)
+            if latest_step is not None:
+                resume_weights_path = weights_dir / f"step_{latest_step}"
+                logger.info(
+                    f"Resuming with train_lm_head: vLLM will start from weight checkpoint at {resume_weights_path}"
+                )
+            else:
+                logger.warning(
+                    f"Resuming with train_lm_head but no weight checkpoints found in {weights_dir}. "
+                    "vLLM will start with base model weights and update after first trainer broadcast."
+                )
+
         # Optionally, start inference process
         if config.inference:
+            # When train_lm_head=True, vLLM must use tie_word_embeddings=False so
+            # that lm_head and embed_tokens are separate tensors for weight updates.
+            if config.trainer.model.lora is not None and config.trainer.model.lora.train_lm_head:
+                if resume_weights_path is not None:
+                    # Weight checkpoint already has config.json with tie_word_embeddings=False
+                    # and lm_head.weight as a separate tensor — use it directly
+                    model_path = str(resume_weights_path)
+                else:
+                    # Fresh start: create untied model dir from base HF model
+                    untied_dir = _prepare_untied_model_dir(config.inference.model.name, config.output_dir)
+                    model_path = str(untied_dir)
+                config.inference.model.name = model_path
+                config.orchestrator.model.name = model_path
+                logger.info(f"Using model directory for inference: {model_path}")
+
             inference_file = get_temp_toml_file()
             with open(inference_file, "wb") as f:
                 tomli_w.dump(config.inference.model_dump(exclude_none=True, mode="json"), f)
@@ -660,6 +785,22 @@ def rl(config: RLConfig):
                     "Either set teacher_gpu_ids to start a teacher inference server, "
                     "or omit teacher_inference and configure orchestrator.teacher_model to use an existing server."
                 )
+            # Teacher also needs untied weights if it receives weight updates with train_lm_head
+            if (
+                config.trainer.model.lora is not None
+                and config.trainer.model.lora.train_lm_head
+                and config.orchestrator.teacher_model is not None
+                and config.orchestrator.teacher_model.share_teacher_weights
+            ):
+                if resume_weights_path is not None:
+                    teacher_model_path = str(resume_weights_path)
+                else:
+                    untied_dir = _prepare_untied_model_dir(config.teacher_inference.model.name, config.output_dir)
+                    teacher_model_path = str(untied_dir)
+                config.teacher_inference.model.name = teacher_model_path
+                config.orchestrator.teacher_model.model.name = teacher_model_path
+                logger.info(f"Using model directory for teacher inference: {teacher_model_path}")
+
             teacher_inference_file = get_temp_toml_file()
             with open(teacher_inference_file, "wb") as f:
                 tomli_w.dump(config.teacher_inference.model_dump(exclude_none=True, mode="json"), f)

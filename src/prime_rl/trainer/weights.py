@@ -144,9 +144,19 @@ def get_adapter_state_dict(model: nn.Module, is_master: bool) -> dict[str, Tenso
     """Get adapter weights with clean keys for PEFT compatibility."""
     lora_state = {}
 
-    named_params = {_strip_pytorch_wrapper_prefix(key): value for key, value in model.named_parameters()}
+    # Use named_modules() instead of named_parameters() to handle tied weights.
+    # named_parameters() deduplicates tied params (e.g., lm_head.weight tied to
+    # embed_tokens.weight), so one copy would be missing from the adapter.
+    # named_modules() iterates all modules and their direct params without dedup.
+    all_params = {}
+    for module_name, module in model.named_modules():
+        for param_name, param in module.named_parameters(recurse=False):
+            full_name = f"{module_name}.{param_name}" if module_name else param_name
+            full_name = _strip_pytorch_wrapper_prefix(full_name)
+            all_params[full_name] = param
+
     for key, value in model.state_dict().items():
-        param = named_params.get(key)
+        param = all_params.get(key)
         if param is None or not param.requires_grad:
             continue
 
