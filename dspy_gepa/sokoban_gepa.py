@@ -137,6 +137,9 @@ Once you have thought about the reasoning process, provide the answer in the fol
 <answer>answer here</answer>
 Do not explain your reasoning inside the answer tags, provide only the final answer. When an example is provided, you should strictly follow the format of the output/answer in that example."""
 
+# Default teacher prompt file path (relative to this script)
+DEFAULT_TEACHER_PROMPT_FILE = str(Path(__file__).parent / "teacher_prompt.txt")
+
 
 # =============================================================================
 # Data Loading
@@ -694,25 +697,34 @@ Examples:
         default=None,
         help="Anthropic API key for Claude reflection model",
     )
-    parser.add_argument("--max-tokens", type=int, default=8192, help="Maximum generation tokens")
+    parser.add_argument("--max-tokens", type=int, default=8192, help="Maximum generation tokens for student model")
+    parser.add_argument(
+        "--reflection-max-tokens",
+        type=int,
+        default=16384,
+        help="Maximum generation tokens for reflection model (default: 16384, uncapped from previous 8192)",
+    )
     parser.add_argument(
         "--temperature", type=float, default=1.0, help="Sampling temperature (default: 1.0, matching rl.toml)"
     )
 
     # Dataset configuration
-    parser.add_argument("--train-size", type=int, default=100, help="Training set size")
-    parser.add_argument("--val-size", type=int, default=50, help="Validation set size")
-    parser.add_argument("--test-size", type=int, default=100, help="Test set size (held-out)")
+    parser.add_argument("--train-size", type=int, default=500, help="Training set size (default: 500)")
+    parser.add_argument("--val-size", type=int, default=150, help="Validation set size (default: 150)")
+    parser.add_argument("--test-size", type=int, default=1000, help="Test set size (held-out, default: 1000)")
 
     # GEPA configuration
     parser.add_argument(
-        "--max-metric-calls", type=int, default=1000, help="GEPA optimization budget (metric evaluations)"
+        "--max-metric-calls",
+        type=int,
+        default=10000,
+        help="GEPA optimization budget (metric evaluations, default: 10000)",
     )
     parser.add_argument(
         "--reflection-minibatch-size",
         type=int,
-        default=5,
-        help="Number of examples per GEPA reflection step (default: 5)",
+        default=20,
+        help="Number of examples per GEPA reflection step (default: 20)",
     )
     parser.add_argument("--num-threads", type=int, default=32, help="Parallelism for evaluation")
 
@@ -727,6 +739,13 @@ Examples:
         type=str,
         default=None,
         help="Resume from existing output directory (with gepa_logs/gepa_state.bin)",
+    )
+    parser.add_argument(
+        "--teacher-prompt-file",
+        type=str,
+        default=None,
+        help="Path to a text file containing the teacher prompt to use as GEPA starting point. "
+        "Defaults to teacher_prompt.txt in the same directory as this script.",
     )
 
     args = parser.parse_args()
@@ -806,7 +825,7 @@ Examples:
         reflection_lm = setup_anthropic_lm(
             model_name=reflection_model,
             api_key=args.anthropic_api_key,
-            max_tokens=8192,
+            max_tokens=args.reflection_max_tokens,
             temperature=args.temperature,
         )
     else:
@@ -822,8 +841,19 @@ Examples:
     program = SokobanProgram()
     metric = create_metric()
 
-    # Run baseline evaluation (on subset of test set)
-    baseline_score = run_evaluation(program, test_set[:50], metric, args.num_threads, "Baseline")
+    # Override starting prompt if --teacher-prompt-file is set
+    if args.teacher_prompt_file:
+        prompt_file = Path(args.teacher_prompt_file)
+        if not prompt_file.exists():
+            console.print(f"[red]Error: Teacher prompt file not found: {prompt_file}[/red]")
+            sys.exit(1)
+        teacher_prompt = prompt_file.read_text().strip()
+        program.solver.signature = program.solver.signature.with_instructions(teacher_prompt)
+        console.print(f"  [bold green]Using teacher prompt from: {prompt_file}[/bold green]")
+        console.print(f"  [dim]{len(teacher_prompt)} chars, {teacher_prompt.count(chr(10)) + 1} lines[/dim]")
+
+    # Run baseline evaluation on full test set
+    baseline_score = run_evaluation(program, test_set, metric, args.num_threads, "Baseline")
 
     if args.baseline_only:
         console.print("\n[yellow]Baseline only - exiting[/yellow]")
@@ -881,6 +911,7 @@ Examples:
 
     # Save results summary
     results_path = output_dir / "results.txt"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     with open(results_path, "w") as f:
         f.write("GEPA Optimization Results\n")
         f.write("========================\n\n")

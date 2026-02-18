@@ -5,40 +5,57 @@ This project uses [GEPA (Genetic-Pareto)](https://dspy.ai/) prompt optimization 
 ## Quick Start
 
 ```bash
-# 1. Start vLLM server (in container on compute node)
+# 1. Start vLLM server (in container on compute node, use merged LoRA model)
 python -m vllm.entrypoints.openai.api_server \
-    --model Qwen/Qwen3-4B-Instruct-2507 \
+    --model /path/to/shared_kl_step150_merged \
+    --served-model-name Qwen/Qwen3-4B-Instruct-2507 \
     --tensor-parallel-size 4 \
     --max-model-len 16384 \
     --port 8000
 
-# 2. Run GEPA (use run_gepa_opus_v7.sh as template!)
-./run_gepa_opus_v7.sh
+# 2. Clear DSPy cache and run GEPA with teacher prompt
+rm -rf "$HOME/.dspy_cache" && mkdir -p "$HOME/.dspy_cache"
+python -u sokoban_gepa.py --reflection-model claude-opus --teacher-prompt-file teacher_prompt.txt
 ```
 
-**CRITICAL**: Always use `run_gepa_opus_v7.sh` as the template for new runs. It includes cache clearing and all bug fixes. See "Known DSPy Pitfalls" below.
+**CRITICAL**: Always clear the DSPy cache before runs. See "Known DSPy Pitfalls" below.
 
-## Results (Run 7 — First Correct Run)
+## Results
+
+### Latest: Teacher Prompt + mb=20 (2026-02-17)
+
+Using the full ~95-line teacher prompt as GEPA starting point with reflection minibatch size 20:
+
+| Metric | Value |
+|--------|-------|
+| Student model | Qwen3-4B (shared_kl_step150 merged LoRA) |
+| Reflection model | Claude Opus |
+| Baseline (teacher prompt) | 55.5% (1000 test) |
+| Best val score | **61.3%** (150 val, Program 5, iter 14) |
+| Test score (optimized) | 56.7% (1000 test) |
+| Budget | 10000 metric calls, ~2.5h on A100x4 |
+
+**Key findings**:
+- mb=20 converges faster than mb=5 (best at iter 14 vs iter 25), fewer false-positive subsamples
+- Val-to-test generalization gap: 61.3% val → 56.7% test suggests overfitting to the small 150-example val set
+- The winning prompt's key innovation is truncation management — bolded imperatives and explicit "BUDGET YOUR REASONING" guidance
+- `teacher_prompt.txt` provides the strong starting point (loaded via `--teacher-prompt-file`)
+
+### Historical: Run 7 (First Correct Run, generic prompt)
 
 | Program | Val Score (200 ex) | Prompt |
 |---------|-------------------|--------|
-| 0 (baseline) | 37% | Generic reasoning prompt with `<answer>` format |
-| 2 (best) | **38%** | Structured ~40-line prompt: symbols, rules, movement clarification, strategy, answer format |
-| 3 | 36.5% | Longer ~80-line detailed strategy prompt |
+| 0 (baseline) | 37% | Generic reasoning prompt |
+| 2 (best) | **38%** | Structured ~40-line prompt |
 
-**Pareto aggregate**: 55.5% (oracle across all programs per example)
-
-**Note**: The best prompt (Program 2) is NOT a one-liner. It is a structured ~40-line prompt
-with symbol definitions, rules, push mechanics, solving strategy, and answer format instructions.
-See `PROGRESS_NOTES.md` for the full prompt text, or extract from the GEPA state file (see below).
-
-**Conclusion**: For Sokoban with Qwen3-4B at temperature=1.0, prompt structure matters more than length. The medium-length structured prompt (38%) outperformed both the baseline and the verbose 80-line guide (36.5%). The model's reasoning ability within the 8192-token budget remains the primary bottleneck.
+**Conclusion**: Starting from the teacher prompt (55.5%) is vastly better than the generic prompt (37%). The teacher prompt encodes domain-specific Sokoban knowledge that GEPA cannot easily rediscover from scratch.
 
 ## Architecture
 
 ```
 dspy_gepa/
 ├── sokoban_gepa.py          # Main GEPA script (PrimeRLAdapter, direct rg.create_dataset)
+├── teacher_prompt.txt       # Teacher prompt (~95 lines) used as GEPA starting point
 ├── eval_prompt_standalone.py # Standalone eval (bypasses DSPy, direct API calls)
 ├── run_gepa_opus_v7.sh      # Run script template (cache clearing + all fixes)
 ├── PROGRESS_NOTES.md        # Detailed progress notes with all findings
@@ -68,14 +85,31 @@ dspy_gepa/
 rm -rf "$HOME/.dspy_cache"
 mkdir -p "$HOME/.dspy_cache"
 
+# Recommended: use teacher prompt as starting point with mb=20
 python -u sokoban_gepa.py \
     --reflection-model claude-opus \
-    --train-size 500 --val-size 200 --test-size 500 \
+    --teacher-prompt-file teacher_prompt.txt \
+    --train-size 500 --val-size 150 --test-size 1000 \
     --max-metric-calls 10000 \
-    --reflection-minibatch-size 5 \
+    --reflection-minibatch-size 20 \
+    --reflection-max-tokens 16384 \
     --num-threads 32 \
     --temperature 1.0 \
     --max-tokens 8192
+```
+
+### Resuming from Checkpoint
+
+```bash
+python -u sokoban_gepa.py \
+    --reflection-model claude-opus \
+    --teacher-prompt-file teacher_prompt.txt \
+    --resume-dir outputs/gepa_<timestamp> \
+    --train-size 500 --val-size 150 --test-size 1000 \
+    --max-metric-calls 10000 \
+    --reflection-minibatch-size 20 \
+    --reflection-max-tokens 16384 \
+    --num-threads 32
 ```
 
 ### Standalone Evaluation (No DSPy)
