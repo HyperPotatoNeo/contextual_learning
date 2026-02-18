@@ -57,14 +57,8 @@ dspy_gepa/
 ├── sokoban_gepa.py          # Main GEPA script (PrimeRLAdapter, direct rg.create_dataset)
 ├── teacher_prompt.txt       # Teacher prompt (~95 lines) used as GEPA starting point
 ├── eval_prompt_standalone.py # Standalone eval (bypasses DSPy, direct API calls)
-├── run_gepa_opus_v7.sh      # Run script template (cache clearing + all fixes)
 ├── PROGRESS_NOTES.md        # Detailed progress notes with all findings
-├── debug_dspy_messages.py   # Debug: what messages DSPy sends
-├── debug_dspy_eval.py       # Debug: DSPy eval vs standalone comparison
-├── diagnose_gap.py          # Diagnostic: DSPy vs standalone on same examples
-├── test_adapter_fix.py      # Test: adapter fix verification
-├── test_dataset_fix.py      # Test: dataset creation fix verification
-├── test_threading_impact.py # Test: 1-thread vs 32-thread eval
+├── outputs/                 # GEPA output directories (checkpoints, optimized programs)
 └── README.md                # This file
 ```
 
@@ -136,7 +130,7 @@ response = client.chat.completions.create(
 
 ## Known DSPy Pitfalls
 
-Four critical bugs were discovered and fixed during development. **All fixes are in `sokoban_gepa.py` and `run_gepa_opus_v7.sh`**, but understanding them prevents future issues:
+Four critical bugs were discovered and fixed during development. **All fixes are in `sokoban_gepa.py`**, but understanding them prevents future issues:
 
 1. **Adapter must use `dspy.configure(adapter=...)`** — Setting `lm.adapter` does nothing; DSPy reads from global settings only.
 
