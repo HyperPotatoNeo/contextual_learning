@@ -587,6 +587,10 @@ def run_gepa_optimization(
     num_threads: int = 32,
     log_dir: str = None,
     reflection_minibatch_size: int = 5,
+    candidate_selection_strategy: str = "pareto",
+    use_merge: bool = True,
+    cache_evaluation: bool = False,
+    seed: int = 0,
 ) -> dspy.Module:
     """
     Run GEPA (Genetic-Pareto) prompt optimization.
@@ -604,6 +608,10 @@ def run_gepa_optimization(
         num_threads: Parallelism for evaluation
         log_dir: Directory for saving optimization logs
         reflection_minibatch_size: Number of examples per reflection step (default 5)
+        candidate_selection_strategy: "pareto" (diverse) or "current_best" (focused)
+        use_merge: Enable merge/crossover between candidates
+        cache_evaluation: Cache (candidate, example) pairs to avoid redundant evals
+        seed: Random seed for reproducibility
 
     Returns:
         Optimized DSPy program
@@ -614,6 +622,14 @@ def run_gepa_optimization(
     console.print(f"  Val size: {len(val_set)}")
     console.print(f"  Reflection LM: {reflection_lm.model}")
     console.print(f"  Reflection minibatch size: {reflection_minibatch_size}")
+    console.print(f"  Candidate selection: {candidate_selection_strategy}")
+    console.print(f"  Use merge: {use_merge}")
+    console.print(f"  Cache evaluation: {cache_evaluation}")
+
+    gepa_kwargs = {}
+    gepa_kwargs["use_cloudpickle"] = True  # Fix: StringSignature can't be standard-pickled
+    if cache_evaluation:
+        gepa_kwargs["cache_evaluation"] = True
 
     optimizer = dspy.GEPA(
         metric=metric,
@@ -624,6 +640,10 @@ def run_gepa_optimization(
         log_dir=log_dir,
         reflection_minibatch_size=reflection_minibatch_size,
         add_format_failure_as_feedback=True,
+        candidate_selection_strategy=candidate_selection_strategy,
+        use_merge=use_merge,
+        seed=seed,
+        gepa_kwargs=gepa_kwargs,
     )
 
     optimized = optimizer.compile(
@@ -727,6 +747,24 @@ Examples:
         help="Number of examples per GEPA reflection step (default: 20)",
     )
     parser.add_argument("--num-threads", type=int, default=32, help="Parallelism for evaluation")
+    parser.add_argument(
+        "--candidate-selection-strategy",
+        type=str,
+        default="pareto",
+        choices=["pareto", "current_best"],
+        help="GEPA candidate selection: 'pareto' (diverse) or 'current_best' (focused improvement chain)",
+    )
+    parser.add_argument(
+        "--no-merge",
+        action="store_true",
+        help="Disable merge/crossover between candidates (reduces total candidates, less selection bias)",
+    )
+    parser.add_argument(
+        "--cache-evaluation",
+        action="store_true",
+        help="Cache (candidate, example) evaluations to avoid redundant metric calls",
+    )
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for GEPA reproducibility (default: 0)")
 
     # Output configuration
     parser.add_argument("--output-dir", type=str, default="outputs", help="Output directory")
@@ -734,6 +772,11 @@ Examples:
     # Run modes
     parser.add_argument("--dry-run", action="store_true", help="Just load data and show config, don't run optimization")
     parser.add_argument("--baseline-only", action="store_true", help="Only run baseline evaluation, skip optimization")
+    parser.add_argument(
+        "--skip-baseline",
+        action="store_true",
+        help="Skip initial baseline evaluation on test set (useful for restarts)",
+    )
     parser.add_argument(
         "--resume-dir",
         type=str,
@@ -853,7 +896,11 @@ Examples:
         console.print(f"  [dim]{len(teacher_prompt)} chars, {teacher_prompt.count(chr(10)) + 1} lines[/dim]")
 
     # Run baseline evaluation on full test set
-    baseline_score = run_evaluation(program, test_set, metric, args.num_threads, "Baseline")
+    if args.skip_baseline:
+        console.print("[yellow]Skipping baseline evaluation (--skip-baseline)[/yellow]")
+        baseline_score = None
+    else:
+        baseline_score = run_evaluation(program, test_set, metric, args.num_threads, "Baseline")
 
     if args.baseline_only:
         console.print("\n[yellow]Baseline only - exiting[/yellow]")
@@ -870,6 +917,10 @@ Examples:
         num_threads=args.num_threads,
         log_dir=str(output_dir / "gepa_logs"),
         reflection_minibatch_size=args.reflection_minibatch_size,
+        candidate_selection_strategy=args.candidate_selection_strategy,
+        use_merge=not args.no_merge,
+        cache_evaluation=args.cache_evaluation,
+        seed=args.seed,
     )
 
     # Evaluate optimized program on full test set
@@ -919,7 +970,11 @@ Examples:
         f.write(f"Student Model: {args.model}\n")
         f.write(f"Reflection Model: {reflection_model}\n")
         f.write(f"Train/Val/Test: {args.train_size}/{args.val_size}/{args.test_size}\n")
-        f.write(f"Max Metric Calls: {args.max_metric_calls}\n\n")
+        f.write(f"Max Metric Calls: {args.max_metric_calls}\n")
+        f.write(f"Reflection Minibatch Size: {args.reflection_minibatch_size}\n")
+        f.write(f"Candidate Selection: {args.candidate_selection_strategy}\n")
+        f.write(f"Use Merge: {not args.no_merge}\n")
+        f.write(f"Cache Evaluation: {args.cache_evaluation}\n\n")
         f.write(f"Baseline Accuracy: {baseline_score}\n")
         f.write(f"Optimized Accuracy: {final_score}\n")
         if isinstance(baseline_score, (int, float)) and isinstance(final_score, (int, float)):
