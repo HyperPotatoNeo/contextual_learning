@@ -56,6 +56,7 @@ Using the full ~95-line teacher prompt as GEPA starting point with reflection mi
 dspy_gepa/
 ├── sokoban_gepa.py          # Main GEPA script (PrimeRLAdapter, direct rg.create_dataset)
 ├── teacher_prompt.txt       # Teacher prompt (~95 lines) used as GEPA starting point
+├── merge_lora_weights.py    # Merge LoRA adapters into base model for vLLM serving
 ├── eval_prompt_standalone.py # Standalone eval (bypasses DSPy, direct API calls)
 ├── PROGRESS_NOTES.md        # Detailed progress notes with all findings
 ├── outputs/                 # GEPA output directories (checkpoints, optimized programs)
@@ -127,6 +128,62 @@ response = client.chat.completions.create(
     temperature=1.0,
 )
 ```
+
+## Merging LoRA Weights
+
+prime-rl saves RL checkpoints with LoRA adapters separate from base weights. vLLM needs a single merged model directory. Use `merge_lora_weights.py` to merge them.
+
+### Checkpoint structure (prime-rl output)
+
+```
+prime-rl/outputs/<run_name>/weights/step_<N>/
+├── model-00001-of-00002.safetensors   # Base model weights (frozen during RL)
+├── model-00002-of-00002.safetensors
+├── model.safetensors.index.json
+├── config.json
+├── tokenizer.json, tokenizer_config.json, ...
+└── lora_adapters/
+    ├── adapter_config.json             # LoRA rank, alpha, target_modules
+    └── adapter_model.bin               # LoRA A/B weights + full-weight overrides
+```
+
+### Usage
+
+```bash
+# From inside the container (needs torch + safetensors)
+python merge_lora_weights.py <checkpoint_dir> <output_dir>
+
+# Example: merge step_150 from a prime-rl run
+python merge_lora_weights.py \
+    /pscratch/sd/s/siddart2/prime-rl/outputs/shared_kl_001_task_1_1/weights/step_150 \
+    /pscratch/sd/s/siddart2/dspy_gepa/models/shared_kl_step150_merged
+
+# Example: merge from a contextual_learning run
+python merge_lora_weights.py \
+    /pscratch/sd/s/siddart2/contextual_learning/outputs/<run_name>/weights/step_<N> \
+    ./models/<run_name>_step<N>_merged
+```
+
+### What it does
+
+1. Loads base model weights from safetensors shards
+2. Loads LoRA adapter weights (`lora_A`, `lora_B` pairs)
+3. Computes `merged = base + (alpha/rank) * (lora_B @ lora_A)` for each target module
+4. Handles `train_lm_head=true`: when `tie_word_embeddings=true` during training, the adapter only saves `embed_tokens` (PyTorch deduplicates tied params). The script syncs `lm_head.weight` from the trained `embed_tokens` and sets `tie_word_embeddings=false` in the output config for inference.
+5. Saves merged weights in the same shard layout, copies tokenizer files
+
+### Then serve with vLLM
+
+```bash
+python -m vllm.entrypoints.openai.api_server \
+    --model ./models/shared_kl_step150_merged \
+    --served-model-name Qwen/Qwen3-4B-Instruct-2507 \
+    --tensor-parallel-size 4 \
+    --max-model-len 16384 \
+    --port 8000
+```
+
+The `--served-model-name` must match the model name used in `sokoban_gepa.py --model` (default: `Qwen/Qwen3-4B-Instruct-2507`).
 
 ## Known DSPy Pitfalls
 
