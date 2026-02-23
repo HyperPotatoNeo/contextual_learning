@@ -1,0 +1,134 @@
+# RSA-Distill Phase 2: Sokoban GRPO + Bidirectional KL (multinode)
+#
+# Self-aggregation env: K student + K teacher responses per problem (2K total).
+# Each teacher j generates from leave-one-out aggregation (excluding student j).
+# Context distillation:
+# - Student completions: KL toward leave-one-out aggregation distribution
+# - Teacher completions: KL toward raw question distribution
+# - Bidirectional via prompt_text override (enable_distill=true)
+#
+# Teacher model = same as inference model (share_teacher_weights=true).
+# KL applied in loss (use_full_reward_baseline=false) with weak tau.
+# kl_only_incorrect gates KL on problems where students fail.
+#
+# Run on 2 nodes:
+#   sbatch -A m4881 -C "gpu&hbm80g" --qos=premium --time 24:00:00 --gpus-per-node 4 --nodes=2 \
+#     ~/prime_rl_rsa_distill_multinode.sh phase2
+#   Node 1: inference (DP=4)
+#   Node 2: teacher GPU 0, trainer GPUs 1,2,3
+
+# ============================================================================
+# Training
+# ============================================================================
+max_steps = 400
+seq_len = 22480 #32768  # Must be large enough for aggregation prompt (K=4 responses) + teacher response
+output_dir = "outputs/rsa_distill_sokoban_phase2"
+
+# GPU assignment: teacher inference on GPU 0, trainer on GPUs 1,2,3
+teacher_gpu_ids = [0]
+trainer_gpu_ids = [1, 2, 3]
+
+# ============================================================================
+# Model
+# ============================================================================
+[model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+# ============================================================================
+# Checkpointing
+# ============================================================================
+[ckpt]
+interval = 50
+
+# ============================================================================
+# W&B Logging
+# ============================================================================
+[wandb]
+project = "rsa-distill"
+name = "sokoban-phase2-kl-k4"
+
+# ============================================================================
+# Trainer Config
+# ============================================================================
+[trainer]
+dist_timeout_seconds = 3600        # 1 hour; first step takes >10 min (env init + 64 rollouts + teacher gen)
+
+[trainer.model]
+impl = "hf"                    # liger_kernel disables fused_lm_head chunking → OOM at 32K seq_len
+
+[trainer.model.ac]
+freq = 1
+
+[trainer.model.lora]
+rank = 32
+alpha = 64
+train_lm_head = true
+
+[trainer.ckpt.weights]
+save_adapter_separately = true
+
+[trainer.optim]
+lr = 1e-5
+weight_decay = 0.0
+betas1 = 0.9
+betas2 = 0.9
+max_norm = 1.0
+
+# KL loss config: weak tau + gating on incorrect
+[trainer.loss]
+adv_tau = 1.0
+teacher_tau = 0.01            # KL ~10x smaller than task reward per token
+student_tau = 0.01
+kl_tau = 0.0                  # No extra KL on importance ratio
+
+# ============================================================================
+# Orchestrator Config
+# ============================================================================
+[orchestrator]
+batch_size = 64
+rollouts_per_example = 1
+trajectory_strategy = "branching"
+
+# Point orchestrator to inference server on Node 1
+# __INFERENCE_NODE__ replaced by multinode_launch.sh
+[orchestrator.client]
+base_url = ["http://__INFERENCE_NODE__:8000/v1"]
+
+[orchestrator.sampling]
+max_tokens = 4096
+temperature = 1.0
+
+# Advantage: no full_reward_baseline (KL applied in loss instead)
+# IMPORTANT: use_full_reward_baseline MUST be false with per_step_grpo + KL
+[orchestrator.advantage]
+use_full_reward_baseline = false
+kl_only_incorrect = false      # KL applies uniformly to all samples (no gating by task reward)
+
+# Teacher model: same model, shares weights, uses task's default system prompt
+[orchestrator.teacher_model]
+context = "Given a problem, your task is to answer the question by thinking step-by-step in a clear and specific manner.\nOnce you have thought about the reasoning process, provide the answer in the following format:\n<answer>answer here</answer>\nDo not explain your reasoning inside the answer tags, provide only the final answer. When an example is provided, you should strictly follow the format of the output/answer in that example."
+share_teacher_weights = true
+eval_baseline = false          # Skip eval baseline for smoke test
+
+# RSA-Distill env: K student + K teacher (2K), leave-one-out, enable_distill=true
+[[orchestrator.env]]
+id = "rsa_distill"
+args = { inner_env_id = "sokoban-env", inner_env_args = { num_train_examples = 15000, num_eval_examples = 1000, seed = 40, min_w = 4, max_w = 9, min_h = 4, max_h = 9, min_boxes = 1, max_boxes = 7, max_depth = 80 }, K = 4, task = "rg", per_step_grpo = true, enable_distill = true }
+
+# ============================================================================
+# Teacher Inference Config (runs locally on Node 2, GPU 0)
+# ============================================================================
+[teacher_inference.model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+[teacher_inference.server]
+port = 8001
+
+# ============================================================================
+# Eval Config (disabled for smoke test)
+# ============================================================================
+[orchestrator.eval]
+num_examples = 32
+rollouts_per_example = 1
+eval_base_model = false
+interval = 10000

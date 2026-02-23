@@ -1,0 +1,116 @@
+# RSA-Distill Phase 2: KL magnitude measurement (single node)
+#
+# Quick test to measure relative magnitudes of task advantage vs KL terms per token.
+# Run on a single interactive node with 4 GPUs.
+
+# ============================================================================
+# Training
+# ============================================================================
+max_steps = 5
+seq_len = 22480
+output_dir = "outputs/rsa_distill_phase2_measure"
+
+# GPU assignment: teacher on GPU 1, trainer on GPUs 2,3
+# (GPU 0 is used by inference server)
+teacher_gpu_ids = [1]
+trainer_gpu_ids = [2, 3]
+
+# ============================================================================
+# Model
+# ============================================================================
+[model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+# ============================================================================
+# Checkpointing (disabled for measurement)
+# ============================================================================
+[ckpt]
+interval = 99999
+
+# ============================================================================
+# W&B Logging
+# ============================================================================
+[wandb]
+project = "rsa-distill"
+name = "phase2-kl-measure"
+
+# ============================================================================
+# Trainer Config
+# ============================================================================
+[trainer.model]
+impl = "hf"
+
+[trainer.model.ac]
+freq = 1
+
+[trainer.model.lora]
+rank = 32
+alpha = 64
+train_lm_head = true
+
+[trainer.ckpt.weights]
+save_adapter_separately = true
+
+[trainer.optim]
+lr = 1e-5
+weight_decay = 0.0
+betas1 = 0.9
+betas2 = 0.9
+max_norm = 1.0
+
+# KL loss config: use current tau values to measure magnitudes
+[trainer.loss]
+adv_tau = 1.0
+teacher_tau = 0.001
+student_tau = 0.001
+kl_tau = 0.0
+
+# ============================================================================
+# Orchestrator Config
+# ============================================================================
+[orchestrator]
+batch_size = 16
+rollouts_per_example = 4
+trajectory_strategy = "branching"
+
+# Inference on localhost (single node)
+[orchestrator.client]
+base_url = ["http://localhost:8000/v1"]
+
+[orchestrator.sampling]
+max_tokens = 4096
+temperature = 1.0
+
+# No full_reward_baseline (KL applied in loss)
+[orchestrator.advantage]
+use_full_reward_baseline = false
+kl_only_incorrect = false
+
+# Teacher model: same model, shares weights
+[orchestrator.teacher_model]
+context = "Given a problem, your task is to answer the question by thinking step-by-step in a clear and specific manner.\nOnce you have thought about the reasoning process, provide the answer in the following format:\n<answer>answer here</answer>\nDo not explain your reasoning inside the answer tags, provide only the final answer. When an example is provided, you should strictly follow the format of the output/answer in that example."
+share_teacher_weights = true
+eval_baseline = false
+
+# RSA-Distill env
+[[orchestrator.env]]
+id = "rsa_distill"
+args = { inner_env_id = "sokoban-env", inner_env_args = { num_train_examples = 15000, num_eval_examples = 1000, seed = 40, min_w = 4, max_w = 9, min_h = 4, max_h = 9, min_boxes = 1, max_boxes = 7, max_depth = 80 }, K = 4, task = "rg", per_step_grpo = true, enable_distill = true }
+
+# ============================================================================
+# Teacher Inference Config (GPU 1, port 8001)
+# ============================================================================
+[teacher_inference.model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+[teacher_inference.server]
+port = 8001
+
+# ============================================================================
+# Eval Config (disabled)
+# ============================================================================
+[orchestrator.eval]
+num_examples = 0
+rollouts_per_example = 1
+eval_base_model = false
+interval = 99999

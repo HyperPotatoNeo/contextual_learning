@@ -1,0 +1,101 @@
+# RSA-Distill Phase 1: GRPO Only (no teacher/KL)
+#
+# Self-aggregation env: K student responses + 1 teacher aggregation per problem.
+# Per-step GRPO: student group has its own baseline, teacher advantage relative
+# to student mean. No teacher model, no KL distillation.
+#
+# Run with:
+#   export PYTHONPATH=/pscratch/sd/s/siddart2/rsa_distill:/pscratch/sd/s/siddart2/rsa:$PYTHONPATH
+#   uv run rl @ experiments/rl_phase1.toml \
+#     --inference_gpu_ids 0,1 --trainer_gpu_ids 2,3 \
+#     --inference.parallel.dp 2
+
+# ============================================================================
+# Training
+# ============================================================================
+max_steps = 500
+seq_len = 16384             # Aggregation prompts can be long
+output_dir = "outputs/rsa_distill_phase1"
+
+# ============================================================================
+# Model
+# ============================================================================
+[model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+# ============================================================================
+# Checkpointing
+# ============================================================================
+[ckpt]
+interval = 50
+
+# ============================================================================
+# W&B Logging
+# ============================================================================
+[wandb]
+project = "rsa-distill"
+name = "phase1-grpo-k4-countdown"
+
+# ============================================================================
+# Trainer Config
+# ============================================================================
+[trainer.model]
+impl = "liger_kernel"
+
+[trainer.model.ac]
+freq = 1
+
+[trainer.model.lora]
+rank = 32
+alpha = 64
+train_lm_head = true
+
+[trainer.ckpt.weights]
+save_adapter_separately = true
+
+[trainer.optim]
+lr = 1e-5
+weight_decay = 0.0
+betas1 = 0.9
+betas2 = 0.9
+max_norm = 1.0
+
+# ============================================================================
+# Orchestrator Config
+# ============================================================================
+[orchestrator]
+batch_size = 64             # Problems * rollouts_per_example
+rollouts_per_example = 4    # >= 2 for GRPO signal
+trajectory_strategy = "branching"  # Each step = independent training sample
+
+[orchestrator.sampling]
+max_tokens = 4096
+temperature = 1.0
+
+# RSA-Distill env: K=4 student responses + 1 teacher aggregation
+[[orchestrator.env]]
+id = "rsa_distill"
+args = { inner_env_id = "countdown", inner_env_args = { num_train_examples = 5000, num_eval_examples = 500, seed = 42 }, K = 4, task = "rg", per_step_grpo = true, enable_distill = false }
+
+# ============================================================================
+# Inference Config
+# ============================================================================
+[inference]
+# gpu_memory_utilization = 0.9
+
+# ============================================================================
+# Eval Config
+# ============================================================================
+[orchestrator.eval]
+num_examples = 64
+rollouts_per_example = 1
+eval_base_model = false
+interval = 50
+
+[orchestrator.eval.sampling]
+max_tokens = 4096
+temperature = 1.0
+
+[[orchestrator.eval.env]]
+id = "rsa_distill"
+args = { inner_env_id = "countdown", inner_env_args = { num_train_examples = 5000, num_eval_examples = 500, seed = 43 }, K = 4, task = "rg", per_step_grpo = true, enable_distill = false }

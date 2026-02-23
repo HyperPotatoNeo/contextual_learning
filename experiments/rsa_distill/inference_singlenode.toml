@@ -1,0 +1,15 @@
+# Inference config for single-node KL measurement test
+# Run with: CUDA_VISIBLE_DEVICES=0 uv run inference @ inference_singlenode.toml
+
+seed = 0
+
+[server]
+host = "0.0.0.0"
+port = 8000
+
+[model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+[parallel]
+dp = 1
+tp = 1

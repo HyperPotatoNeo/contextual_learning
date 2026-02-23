@@ -115,6 +115,10 @@ def compute_loss(
     total_teacher_kl = []
     total_teacher_seq_kl = []
     total_combined_advantage = []
+    total_task_adv_abs = []
+    total_kl_contrib_abs = []
+    total_raw_teacher_lp = []
+    total_raw_trainer_lp = []
 
     if teacher_logprobs is None:
         teacher_logprobs = [None] * len(trainer_logprobs)
@@ -158,6 +162,7 @@ def compute_loss(
         else:
             # Original behavior: scale by adv_tau and add per-token KL terms
             advantages = loss_config.adv_tau * advantages
+            total_task_adv_abs.append(_safe_mean(advantages.abs(), loss_mask))
             if teacher_logprobs is not None:
                 # Separate weights for teacher log prob and student log prob (entropy) terms
                 # teacher_kl = teacher_logprobs - trainer_logprobs
@@ -166,6 +171,9 @@ def compute_loss(
                     loss_config.teacher_tau * teacher_logprobs.detach()
                     - loss_config.student_tau * trainer_logprobs.detach()
                 )
+                total_kl_contrib_abs.append(_safe_mean(kl_terms.abs(), loss_mask))
+                total_raw_teacher_lp.append(_safe_mean(teacher_logprobs.detach(), loss_mask))
+                total_raw_trainer_lp.append(_safe_mean(trainer_logprobs.detach(), loss_mask))
                 # Gate KL terms by (1 - group_task_mean) when kl_only_incorrect is enabled
                 if kl_gates is not None:
                     kl_terms = kl_gates * kl_terms
@@ -216,4 +224,12 @@ def compute_loss(
         result["teacher_kl"] = torch.stack(total_teacher_kl)
     if total_teacher_seq_kl:
         result["teacher_seq_kl"] = torch.stack(total_teacher_seq_kl)
+    if total_task_adv_abs:
+        result["task_adv_abs"] = torch.stack(total_task_adv_abs)
+    if total_kl_contrib_abs:
+        result["kl_contrib_abs"] = torch.stack(total_kl_contrib_abs)
+    if total_raw_teacher_lp:
+        result["raw_teacher_lp"] = torch.stack(total_raw_teacher_lp)
+    if total_raw_trainer_lp:
+        result["raw_trainer_lp"] = torch.stack(total_raw_trainer_lp)
     return scaled_loss, result

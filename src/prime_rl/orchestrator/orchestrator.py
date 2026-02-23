@@ -61,6 +61,69 @@ from prime_rl.utils.utils import (
 from prime_rl.utils.vf import generate_batch, get_completion_len, get_prompt_len, get_seq_len
 
 
+def _compute_separated_step_metrics(
+    train_examples: list[TrainingSample],
+    rollout_to_example_indices: list[list[int]],
+    has_teacher: bool,
+) -> dict[str, float]:
+    """Compute per-step-type metrics for multi-step rollouts (e.g. RSADistillEnv).
+
+    For rollouts with >1 example (branching strategy), the first half of steps
+    are student steps and the second half are teacher steps (2K total: K student
+    + K teacher). Only activates for multi-step rollouts; single-step rollouts
+    are ignored.
+
+    Returns wandb-ready dict with keys like rsa_distill/student_reward_mean, etc.
+    """
+    student_rewards: list[float] = []
+    teacher_rewards: list[float] = []
+    student_advantages: list[float] = []
+    teacher_advantages: list[float] = []
+    student_kls: list[float] = []
+    teacher_kls: list[float] = []
+
+    for indices in rollout_to_example_indices:
+        if len(indices) <= 1:
+            continue  # Skip single-step rollouts
+
+        for step_idx, example_idx in enumerate(indices):
+            example = train_examples[example_idx]
+            is_teacher = step_idx >= len(indices) // 2
+
+            # Rewards and advantages
+            if example.reward is not None:
+                (teacher_rewards if is_teacher else student_rewards).append(example.reward)
+            if example.advantage is not None:
+                (teacher_advantages if is_teacher else student_advantages).append(example.advantage)
+
+            # KL: sum(teacher_lp - inference_lp) over completion tokens
+            if has_teacher and example.teacher_logprobs is not None:
+                prompt_len = len(example.prompt_ids)
+                teacher_lps = example.teacher_logprobs[prompt_len:]
+                inference_lps = example.completion_logprobs
+                min_len = min(len(teacher_lps), len(inference_lps))
+                if min_len > 0:
+                    # Per-token KL proxy: teacher_lp - student_lp (positive = teacher favors this token more)
+                    kl = sum(teacher_lps[i] - inference_lps[i] for i in range(min_len))
+                    (teacher_kls if is_teacher else student_kls).append(kl)
+
+    result: dict[str, float] = {}
+    if student_rewards:
+        result["rsa_distill/student_reward_mean"] = sum(student_rewards) / len(student_rewards)
+    if teacher_rewards:
+        result["rsa_distill/teacher_reward_mean"] = sum(teacher_rewards) / len(teacher_rewards)
+    if student_advantages:
+        result["rsa_distill/student_advantage_mean"] = sum(student_advantages) / len(student_advantages)
+    if teacher_advantages:
+        result["rsa_distill/teacher_advantage_mean"] = sum(teacher_advantages) / len(teacher_advantages)
+    if student_kls:
+        result["rsa_distill/student_kl_mean"] = sum(student_kls) / len(student_kls)
+    if teacher_kls:
+        result["rsa_distill/teacher_kl_mean"] = sum(teacher_kls) / len(teacher_kls)
+
+    return result
+
+
 @clean_exit
 @logger.catch(reraise=True)
 async def orchestrate(config: OrchestratorConfig):
@@ -410,7 +473,8 @@ async def orchestrate(config: OrchestratorConfig):
                 indices = list(range(len(train_examples), len(train_examples) + len(train_example)))
                 rollout_to_example_indices.append(indices)
                 for te in train_example:
-                    te.reward = train_rollout["reward"]
+                    if te.reward is None:
+                        te.reward = train_rollout["reward"]
                 train_examples.extend(train_example)
             else:
                 rollout_to_example_indices.append([])
@@ -501,10 +565,12 @@ async def orchestrate(config: OrchestratorConfig):
             kl_gates = compute_kl_gates(rewards, config.rollouts_per_example)
 
         # Assign advantages (and kl_gates) to train_examples
+        # Skip if already set by the env (e.g. RSAgent per_step_grpo)
         for rollout_idx, indices in enumerate(rollout_to_example_indices):
             for idx in indices:
-                train_examples[idx].advantage = advantages[rollout_idx]
-                if kl_gates is not None:
+                if train_examples[idx].advantage is None:
+                    train_examples[idx].advantage = advantages[rollout_idx]
+                if kl_gates is not None and train_examples[idx].kl_gate is None:
                     train_examples[idx].kl_gate = kl_gates[rollout_idx]
 
         training_batch = TrainingBatch(
@@ -658,6 +724,14 @@ async def orchestrate(config: OrchestratorConfig):
 
             per_env_ratio = results_df.task.value_counts(normalize=True).to_dict()
             to_log.update({f"batch/{env}": ratio for env, ratio in per_env_ratio.items()})
+
+        # Compute separated student/teacher metrics for multi-step rollouts (e.g. RSADistillEnv)
+        # Only activates when rollouts produce multiple examples via branching strategy
+        if config.trajectory_strategy == "branching":
+            separated_metrics = _compute_separated_step_metrics(
+                train_examples, rollout_to_example_indices, config.teacher_model is not None
+            )
+            to_log.update(separated_metrics)
 
         # Optionally, add val metrics
         if val_results_df is not None:

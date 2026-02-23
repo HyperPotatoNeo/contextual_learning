@@ -134,7 +134,8 @@ def branch_rollout(state: vf.State) -> list[TrainingSample] | None:
             completion_mask=completion_mask,
             completion_logprobs=deepcopy(tokens["completion_logprobs"]),
             completion_temperatures=[temperature] * len(completion_ids),  # Per-token temperatures
-            advantage=None,
+            advantage=step.get("advantage"),  # Pre-computed by env (e.g. RSAgent per_step_grpo)
+            reward=step.get("reward"),  # Pre-computed by env (e.g. RSAgent per_step_grpo)
             teacher_logprobs=None,
             prompt_text=_extract_prompt_text(step.get("prompt")),  # For context distillation
         )

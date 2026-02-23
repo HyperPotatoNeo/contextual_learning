@@ -143,6 +143,8 @@ class MultiPacker(BasePacker):
             )
         if sample_length == 0:
             return False, "Run wrote a sample with no tokens"
+        if len(sample.completion_ids) == 0:
+            return False, "Run wrote a sample with no completion tokens (empty generation)"
         if sample_length > self.seq_len:
             return (
                 False,

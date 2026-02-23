@@ -69,6 +69,8 @@ def extract_result(state: vf.State, temperature: float) -> dict:
             # completion_mask, completion_logprobs, is_truncated
             "tokens": step.get("tokens"),
             "temperature": temperature,  # Store temperature per-turn for per-token temp support
+            "reward": step.get("reward"),  # Per-step reward from env (e.g. RSADistillEnv per_step_grpo)
+            "advantage": step.get("advantage"),  # Per-step advantage from env
         }
         trajectory.append(traj_step)
 
