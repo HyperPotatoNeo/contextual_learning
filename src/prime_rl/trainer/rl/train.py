@@ -309,7 +309,8 @@ def train(config: RLTrainerConfig):
             teacher_logprobs = (
                 micro_batch["teacher_logprobs"].to("cuda") if micro_batch["teacher_logprobs"] is not None else None
             )
-            kl_gates = micro_batch["kl_gates"].to("cuda") if micro_batch["kl_gates"] is not None else None
+            kl_gates = micro_batch.get("kl_gates")
+            kl_gates = kl_gates.to("cuda") if kl_gates is not None else None
 
             labels = shift_tensor_left(input_ids)
 

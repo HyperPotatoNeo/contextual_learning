@@ -1,0 +1,212 @@
+# Context Distillation: Task reward ON, KL weight 0.001
+# A3: adv_tau=1.0, teacher_tau=0.001, student_tau=0.001
+# Run with: uv run rl @ experiments/context_distill/rl_task1.0_kl0.001.toml \
+#   --inference-gpu-ids '[0,1]' --teacher-gpu-ids '[2,3]' --trainer-gpu-ids '[4,5,6,7]'
+
+# ============================================================================
+# Training
+# ============================================================================
+max_steps = 400
+seq_len = 16884
+output_dir = "outputs/cd_task1.0_kl0.001_s42"
+
+# ============================================================================
+# Model
+# ============================================================================
+[model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+# ============================================================================
+# Checkpointing
+# ============================================================================
+[ckpt]
+interval = 50
+
+# ============================================================================
+# Logging
+# ============================================================================
+[wandb]
+project = "sokoban-rl"
+name = "cd-task1.0-kl0.001-s42"
+
+# ============================================================================
+# Trainer Config
+# ============================================================================
+[trainer.model]
+impl = "liger_kernel"
+
+[trainer.model.ac]
+freq = 1
+
+[trainer.model.lora]
+rank = 16
+alpha = 64
+
+[trainer.ckpt.weights]
+save_adapter_separately = true
+
+[trainer.optim]
+lr = 2e-5
+betas1 = 0.85
+betas2 = 0.9
+weight_decay = 0.0
+max_norm = 1.0
+
+[trainer.loss]
+adv_tau = 1.0
+teacher_tau = 0.001
+student_tau = 0.001
+
+# ============================================================================
+# Orchestrator Config
+# ============================================================================
+[orchestrator]
+batch_size = 256
+rollouts_per_example = 16
+
+[orchestrator.advantage]
+use_full_reward_baseline = true
+kl_only_incorrect = false
+
+[orchestrator.sampling]
+max_tokens = 8192
+temperature = 1.0
+
+[orchestrator.teacher_model]
+context = """You are going to solve a 'sokoban' puzzle. Your goal is to push all boxes onto all goal positions.
+
+SYMBOLS:
+* - The player
+% - The player on a goal
+@ - A box (not on a goal)
+X - A goal (no box on it)
+$ - A box on a goal (this cell is BOTH a box AND a goal)
++ - A wall
+- - An empty position
+
+RULES:
+- You can move the player Up (U), Down (D), Left (L), or Right (R).
+- To push a box, the player moves into the box's cell from an adjacent cell; the box moves one cell in the same direction. The cell the box moves into must be empty (- or X), not a wall or another box.
+- The puzzle is solved when every goal has a box on it.
+
+COUNTING GOALS AND BOXES:
+- Every cell with X is a goal without a box.
+- Every cell with $ is BOTH a goal AND a box (already solved for that cell).
+- Every cell with % is a goal with the player on it (no box).
+- Total goals = count of X + count of $ + count of %
+- Total boxes = count of @ + count of $
+- The number of boxes always equals the number of goals.
+- You need to move all @ boxes onto X (or %) goal positions. Boxes already shown as $ are already on goals.
+
+IMPORTANT SOLVING GUIDELINES:
+
+1. FIRST, carefully parse the grid. Number rows (0 = top) and columns (0 = left). List ALL box positions and ALL goal positions explicitly. Double-check by re-reading each row character by character. Pay attention to spaces between characters in the input - each cell is separated by spaces.
+
+2. Determine which boxes need to move to which goals. Consider all possible assignments. Think about which assignment avoids deadlocks and is actually achievable given the wall layout.
+
+3. Plan your pushes carefully. To push a box in a direction, the player must be on the OPPOSITE side of the box:
+   - To push a box RIGHT, the player must be to the LEFT of the box.
+   - To push a box LEFT, the player must be to the RIGHT of the box.
+   - To push a box DOWN, the player must be ABOVE the box.
+   - To push a box UP, the player must be BELOW the box.
+
+4. Check that you don't push boxes into corners or against walls where they can never reach a goal (deadlock detection). A box in a corner (two adjacent walls) that is NOT on a goal is a deadlock.
+
+5. Be careful not to push a box that's already on a goal ($) off its goal unless absolutely necessary and you have a plan to place it back.
+
+6. When moving the player to get into position for a push, ensure the path exists — the player cannot walk through walls or boxes. Trace the path step by step if needed.
+
+7. When simulating moves, track the player position and ALL box positions after EVERY move. Ensure you don't accidentally move through walls or boxes.
+
+8. When the player moves into a cell containing a box, that's a PUSH. The box moves one cell in the same direction. Verify the destination cell for the box is valid (not a wall, not another box).
+
+9. When the player moves into an empty cell (- or X), that's just movement, no box is pushed.
+
+10. After planning your full solution, SIMULATE IT COMPLETELY on the grid, move by move, tracking all positions. Verify every move is legal and that the final state has all goals covered.
+
+CRITICAL DEADLOCK PATTERNS TO WATCH FOR:
+- A box pushed against a wall with no goal along that wall in the reachable direction is often a deadlock.
+- Two boxes side by side against a wall can create mutual deadlocks.
+- A box in a corner (two perpendicular walls) that is not on a goal is always a deadlock.
+
+CRITICAL INSTRUCTIONS — READ THESE CAREFULLY:
+- Keep your reasoning CONCISE. Do not exhaustively explore every dead end.
+- Focus on finding a working solution efficiently.
+- **OUTPUT YOUR ANSWER EARLY.** If your analysis is getting long, STOP reasoning and give your best answer immediately. Do NOT let your response get truncated.
+- Your solution must be a single string of characters using only U, D, L, R.
+- You MUST provide your answer inside <answer>...</answer> tags with ONLY the move string inside.
+- Do NOT leave the answer tags empty. ALWAYS provide at least one move character.
+- If the puzzle appears already solved, output a simple move that doesn't break anything (like moving the player to an empty cell) rather than leaving the answer empty.
+- ALWAYS provide an answer, even if you're not 100% certain it's optimal.
+- Double-check your move string character by character before submitting.
+- Prioritize CORRECTNESS over optimality. A longer correct solution is better than a shorter wrong one.
+- **NEVER let your response be truncated. If you are running long, IMMEDIATELY output your best answer in <answer> tags.**
+
+COMMON MISTAKES TO AVOID:
+- When pushing a box multiple cells in the same direction, remember: after pushing a box one cell, the player ends up where the box was. If you need to push it again in the same direction, the player is already in position — simply move in the same direction again. You do NOT need to reposition.
+- Track positions carefully after every single move. Don't skip ahead or assume positions.
+- When the player moves to a cell adjacent to a box, that's just movement — NOT a push. A push only happens when the player moves INTO the box's cell.
+- After constructing your solution, re-simulate it from scratch on the original grid before outputting.
+- When you write out your final answer string, make sure it matches your simulation exactly. Do not accidentally include extra characters or omit characters.
+- If you write multiple candidate answers during reasoning, make sure the one inside <answer> tags is the correct final one.
+
+SOLVING STRATEGY:
+1. Parse the grid and identify all positions. List them explicitly.
+2. Identify which box should go to which goal. Consider the geometry carefully.
+3. Plan the order of pushes. Generally, push boxes to goals that are in corners/edges first (since those are harder to reach later), and push boxes that are furthest from goals first.
+4. For each push, figure out where the player needs to be positioned (opposite side of the push direction).
+5. Figure out the path the player takes to get into position for each push, avoiding walls and boxes. If boxes block the player's path, you may need to reorder your pushes.
+6. Concatenate all player movements and pushes into a single move string.
+7. SIMULATE the full move string on the grid to verify correctness before outputting.
+8. If simulation reveals an error, fix it before outputting.
+
+SIMULATION VERIFICATION:
+After constructing your solution, trace through it move by move:
+- Start with the initial grid state.
+- For each move (U/D/L/R), compute the new player position.
+- If the new position is a wall, the move is INVALID — fix your solution.
+- If the new position has a box, compute where the box would be pushed to and verify it's valid (not a wall, not another box).
+- If the new position is empty (- or X), the player simply moves there.
+- After all moves, check that every goal has a box on it.
+
+OUTPUT FORMAT:
+Provide your answer as a single move string inside answer tags:
+<answer>YOURMOVESTRING</answer>
+
+Example:
+<answer>LLUURRDDLL</answer>"""
+eval_baseline = true
+
+# Environment
+[[orchestrator.env]]
+id = "sokoban-env"
+args = { num_train_examples = 15000, num_eval_examples = 1000, seed = 42, min_w = 4, max_w = 9, min_h = 4, max_h = 9, min_boxes = 1, max_boxes = 7, max_depth = 80 }
+
+# ============================================================================
+# Inference Config
+# ============================================================================
+[inference]
+seed = 42
+
+[inference.parallel]
+dp = 2
+
+[orchestrator.log]
+level = "debug"
+
+# ============================================================================
+# Eval Config
+# ============================================================================
+[orchestrator.eval]
+num_examples = 1024
+rollouts_per_example = 1
+eval_base_model = false
+interval = 1000
+
+[orchestrator.eval.sampling]
+max_tokens = 8192
+temperature = 1.0
+
+[[orchestrator.eval.env]]
+id = "sokoban-env"
+args = { num_train_examples = 5000, num_eval_examples = 1000, seed = 42, min_w = 4, max_w = 9, min_h = 4, max_h = 9, min_boxes = 1, max_boxes = 7, max_depth = 80 }

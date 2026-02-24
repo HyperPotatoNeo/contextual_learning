@@ -530,6 +530,15 @@ class RLConfig(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def auto_setup_inference_client_url(self):
+        """Auto-configure orchestrator client base_url from inference server port."""
+        if self.inference is not None:
+            host = self.inference.server.host or "localhost"
+            port = self.inference.server.port
+            self.orchestrator.client.base_url = [f"http://{host}:{port}/v1"]
+        return self
+
+    @model_validator(mode="after")
     def validate_teacher_model(self):
         if self.trainer.loss.teacher_tau > 0 and not self.orchestrator.teacher_model:
             raise ValueError(
@@ -696,6 +705,12 @@ def rl(config: RLConfig):
         # Cleaning rollouts (so that trainer does not train on old rollouts)
         logger.info(f"Cleaning rollout dir ({rollout_dir})")
         shutil.rmtree(rollout_dir, ignore_errors=True)
+
+        # Cleaning orchestrator checkpoints (so that trainer does not resume from stale progress)
+        orch_ckpt_dir = config.orchestrator.output_dir / "checkpoints"
+        if not (config.ckpt and config.ckpt.resume_step):
+            logger.info(f"Cleaning orchestrator checkpoint dir ({orch_ckpt_dir})")
+            shutil.rmtree(orch_ckpt_dir, ignore_errors=True)
 
     # Start processes
     processes: list[Popen] = []
