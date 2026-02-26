@@ -55,7 +55,7 @@ name = "sokoban-context-distill"
 # Trainer Config
 # ============================================================================
 [trainer.model]
-impl = "liger_kernel"       # Optimized kernels
+impl = "hf"
 
 [trainer.model.ac]          # Activation checkpointing
 freq = 1

@@ -343,6 +343,12 @@ class RLConfig(BaseSettings):
             if self.inference is not None:
                 self.inference.model.name = self.model.name
 
+            # Re-sync trainer tokenizer: auto_setup_tokenizer on TrainerConfig runs
+            # before this validator, so it may have picked up the default model name
+            # instead of the top-level override.
+            if self.trainer.tokenizer.name != self.model.name:
+                self.trainer.tokenizer.name = self.model.name
+
         validate_shared_model_name(self.trainer, self.orchestrator, self.inference)
 
         return self

@@ -68,6 +68,19 @@ id = "reverse-text"          # Environment name
 project = "my-project"
 ```
 
+## W&B Run Naming Convention
+
+When launching multiple seeds of the same experiment, use `--wandb.group` to group runs by seed so they can be compared on W&B:
+
+```bash
+# Example: 2 conditions x 2 seeds
+# Seed 1 runs grouped together, seed 2 runs grouped together
+--wandb.name shared-standard-kl-s1 --wandb.group seed-1
+--wandb.name shared-gated-kl-s1    --wandb.group seed-1
+--wandb.name shared-standard-kl-s2 --wandb.group seed-2
+--wandb.name shared-gated-kl-s2    --wandb.group seed-2
+```
+
 ## Common Commands
 
 ### Debug/Validation Tests

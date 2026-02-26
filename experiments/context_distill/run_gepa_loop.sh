@@ -225,7 +225,7 @@ for ((ITER=START_ITER; ITER<NUM_ITERS; ITER++)); do
         echo "${LOG_TAG}  [DRY RUN] Using initial prompt as placeholder (real prompt not yet generated)"
     fi
 
-    uv run python "$OVERLAY_GENERATOR" \
+    python "$OVERLAY_GENERATOR" \
         --iteration "$ITER" \
         --steps-per-iter "$STEPS_PER_ITER" \
         --prompt-file "$OVERLAY_PROMPT" \
@@ -233,7 +233,7 @@ for ((ITER=START_ITER; ITER<NUM_ITERS; ITER++)); do
         --base-config "$BASE_CONFIG"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "${LOG_TAG}[DRY RUN] Would run: uv run rl @ $BASE_CONFIG @ $OVERLAY_FILE"
+        echo "${LOG_TAG}[DRY RUN] Would run: rl @ $BASE_CONFIG @ $OVERLAY_FILE"
         echo "${LOG_TAG}[DRY RUN] Would merge LoRA: ${OUTPUT_DIR}/weights/step_${ITER_END} -> ${OUTPUT_DIR}/merged_iter${ITER}"
         echo "${LOG_TAG}[DRY RUN] Would start vLLM with ${OUTPUT_DIR}/merged_iter${ITER} (GEPA_GPU_IDS=${GEPA_GPU_IDS:-all})"
         echo "${LOG_TAG}[DRY RUN] Would run GEPA with prompt from $CURRENT_PROMPT"
@@ -264,9 +264,10 @@ for ((ITER=START_ITER; ITER<NUM_ITERS; ITER++)); do
         )
     fi
 
-    uv run rl \
+    rl \
         @ "$BASE_CONFIG" \
         @ "$OVERLAY_FILE" \
+        --output-dir "$OUTPUT_DIR" \
         --inference-gpu-ids "$INFERENCE_GPU_IDS" \
         --teacher-gpu-ids "$TEACHER_GPU_IDS" \
         --trainer-gpu-ids "$TRAINER_GPU_IDS" \
@@ -306,7 +307,7 @@ for ((ITER=START_ITER; ITER<NUM_ITERS; ITER++)); do
     echo "${LOG_TAG}  Source: $STEP_DIR"
     echo "${LOG_TAG}  Output: $MERGED_DIR"
 
-    uv run python dspy_gepa/merge_lora_weights.py "$STEP_DIR" "$MERGED_DIR"
+    python dspy_gepa/merge_lora_weights.py "$STEP_DIR" "$MERGED_DIR"
 
     if [ ! -f "${MERGED_DIR}/config.json" ]; then
         echo "${LOG_TAG}ERROR: Merged model missing config.json: $MERGED_DIR"
@@ -330,7 +331,7 @@ for ((ITER=START_ITER; ITER<NUM_ITERS; ITER++)); do
         VLLM_ENV_PREFIX="CUDA_VISIBLE_DEVICES=$GEPA_GPU_IDS"
     fi
 
-    env $VLLM_ENV_PREFIX uv run python -m vllm.entrypoints.openai.api_server \
+    env $VLLM_ENV_PREFIX python -m vllm.entrypoints.openai.api_server \
         --model "$MERGED_DIR" \
         --served-model-name "$MODEL_NAME" \
         --tensor-parallel-size "$GEPA_TP" \
@@ -366,7 +367,7 @@ for ((ITER=START_ITER; ITER<NUM_ITERS; ITER++)); do
     echo "${LOG_TAG}  Output dir: $GEPA_OUTPUT_DIR"
     echo "${LOG_TAG}  Reflection model: $REFLECTION_MODEL"
 
-    uv run python dspy_gepa/sokoban_gepa.py \
+    python dspy_gepa/sokoban_gepa.py \
         --model "$MODEL_NAME" \
         --api-base "http://localhost:${VLLM_PORT}/v1" \
         --reflection-model "$REFLECTION_MODEL" \

@@ -1,12 +1,22 @@
-# Sokoban RL Training Config
-# Run with: uv run rl @ experiments/sokoban/rl.toml
+# Baseline RL (no context distillation)
+# Same setup as rl.toml but without teacher — pure task reward only.
+#
+# GPU allocation (3 GPUs):
+#   GPU 0,1: Student inference (vLLM, DP=2)
+#   GPU 2,3: Trainer (FSDP2)
+#
+# Run with:
+#   uv run rl @ experiments/context_distill/baseline.toml \
+#     --inference_gpu_ids 0,1 \
+#     --trainer_gpu_ids 2,3 \
+#     --inference.parallel.dp 2
 
 # ============================================================================
 # Training
 # ============================================================================
-max_steps = 500
-seq_len = 4096              # Max sequence length (also micro batch token capacity)
-output_dir = "outputs/sokoban"
+max_steps = 400
+seq_len =  16884 #8192              # Max sequence length (also micro batch token capacity)
+output_dir = "outputs/baseline"
 
 # ============================================================================
 # Model
@@ -19,15 +29,13 @@ name = "Qwen/Qwen3-4B-Instruct-2507"
 # ============================================================================
 [ckpt]
 interval = 50              # Save every N steps
-# keep_last = 3              # Keep last N checkpoints
 
 # ============================================================================
-# W&B Logging
+# Logging
 # ============================================================================
 [wandb]
 project = "sokoban-rl"
-name = "sokoban-4b-lora"
-# offline = true           # Set to true to disable W&B
+name = "sokoban-baseline"
 
 # ============================================================================
 # Trainer Config
@@ -39,44 +47,40 @@ impl = "hf"
 freq = 1
 
 [trainer.model.lora]        # LoRA settings
-rank = 16
+rank = 32
 alpha = 64
+train_lm_head = true
 
 [trainer.ckpt.weights]
 save_adapter_separately = true
 
-# dropout = 0.0
-# target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
-
 [trainer.optim]
 lr = 1e-5
+betas1 = 0.9
+betas2 = 0.9
 weight_decay = 0.0
 max_norm = 1.0              # Gradient clipping
 
-# [trainer.scheduler]
-# type = "cosine"
-# warmup_steps = 10
+[trainer.loss]
+adv_tau = 1.0               # Weight for task reward
+teacher_tau = 0.0           # No distillation
+student_tau = 0.0           # No entropy bonus
 
 # ============================================================================
 # Orchestrator Config
 # ============================================================================
-# RL Batching: Samples are sequence-packed into micro batches of seq_len tokens.
-# Each micro batch has shape [1, seq_len]. Number of micro batches per GPU is
-# approximately batch_size / dp_world_size (where dp_world_size = num trainer GPUs).
-# There is no explicit micro_batch_size - it's computed dynamically by the packer.
 [orchestrator]
 batch_size = 256            # Global batch size (total samples per step)
-rollouts_per_example = 8    # Rollouts per prompt
+rollouts_per_example = 16 #8    # Rollouts per prompt
 
 [orchestrator.sampling]
-max_tokens = 4096           # Max generation tokens
+max_tokens = 8192           # Max generation tokens
 temperature = 1.0           # Sampling temperature
-# repetition_penalty = 1.0
-# seed = 42                 # For reproducibility
 
+# Environment
 [[orchestrator.env]]
 id = "sokoban-env"
-args = { num_train_examples = 5000, num_eval_examples = 200, seed = 42, min_w = 4, max_w = 8, min_h = 4, max_h = 8, min_boxes = 3, max_boxes = 8, max_depth = 80 }
+args = { num_train_examples = 15000, num_eval_examples = 1000, seed = 40, min_w = 4, max_w = 9, min_h = 4, max_h = 9, min_boxes = 1, max_boxes = 7, max_depth = 80 }
 
 # ============================================================================
 # Inference Config
@@ -84,5 +88,22 @@ args = { num_train_examples = 5000, num_eval_examples = 200, seed = 42, min_w = 
 [inference]
 # gpu_memory_utilization = 0.9
 
-# [inference.parallel]
-# tp = 1                    # Tensor parallelism for large models
+[orchestrator.log]
+level = "debug"
+
+# ============================================================================
+# Eval Config
+# ============================================================================
+[orchestrator.eval]
+num_examples = 1024
+rollouts_per_example = 1
+eval_base_model = false
+interval = 1000 # we dont need intermediate evals
+
+[orchestrator.eval.sampling]
+max_tokens = 8192
+temperature = 1.0
+
+[[orchestrator.eval.env]]
+id = "sokoban-env"
+args = { num_train_examples = 5000, num_eval_examples = 1000, seed = 42, min_w = 4, max_w = 9, min_h = 4, max_h = 9, min_boxes = 1, max_boxes = 7, max_depth = 80 }
