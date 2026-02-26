@@ -41,12 +41,16 @@ STEPS_PER_ITER="${STEPS_PER_ITER:-150}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/gepa_loop}"
 BASE_CONFIG="${BASE_CONFIG:-experiments/context_distill/rl_gepa_loop.toml}"
 OVERLAY_GENERATOR="${OVERLAY_GENERATOR:-experiments/context_distill/generate_gepa_overlay.py}"
-# INITIAL_PROMPT: check env var first, then read from [gepa] section in base config, then default
+# INITIAL_PROMPT: env var > [gepa].initial_prompt in base config > default
 if [ -z "${INITIAL_PROMPT:-}" ]; then
     INITIAL_PROMPT=$(python3 -c "
-import tomli, sys
+import sys
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
 with open(sys.argv[1], 'rb') as f:
-    c = tomli.load(f)
+    c = tomllib.load(f)
 print(c.get('gepa', {}).get('initial_prompt', ''))
 " "$BASE_CONFIG" 2>/dev/null || true)
 fi

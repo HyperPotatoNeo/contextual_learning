@@ -7,7 +7,7 @@
 #   --inference-gpu-ids '[0,1]' --teacher-gpu-ids '[2,3]' --trainer-gpu-ids '[4,5,6,7]'
 
 # ============================================================================
-# GEPA Loop Settings (read by run_gepa_loop.sh, not by RL code)
+# GEPA Loop Settings (read by run_gepa_loop.sh, ignored by RL code)
 # ============================================================================
 [gepa]
 initial_prompt = "dspy_gepa/teacher_prompt_long.txt"

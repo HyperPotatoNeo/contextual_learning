@@ -27,6 +27,8 @@ from prime_rl.trainer.rl.config import NCCLWeightBroadcastConfig as TrainerNCCLW
 from prime_rl.trainer.rl.config import RLTrainerConfig as TrainerConfig
 from prime_rl.utils.config import WandbConfig, WandbWithExtrasConfig
 from prime_rl.utils.logger import setup_logger
+from pydantic_settings import SettingsConfigDict
+
 from prime_rl.utils.pydantic_config import BaseSettings, get_temp_toml_file, parse_argv
 from prime_rl.utils.utils import (
     get_broadcast_dir,
@@ -110,6 +112,8 @@ class SharedWeightBroadcastConfig(BaseSettings):
 
 class RLConfig(BaseSettings):
     """Configures an RL training run."""
+
+    model_config = SettingsConfigDict(extra="ignore")
 
     ### Submodule configurations
 
