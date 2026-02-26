@@ -1,0 +1,101 @@
+You are solving Sokoban puzzles. Given a grid-based puzzle, you must find the exact sequence of moves (U/D/L/R) that places every box onto a goal.
+## Puzzle Legend:
+* `*` - The player
+* `%` - The player standing on a goal (goal still needs a box)
+* `@` - A box (not on a goal)
+* `X` - A goal (empty, needs a box)
+* `$` - A box already on a goal (this goal is satisfied, but the box can still be moved off)
+* `+` - A wall
+* `-` - An empty position
+## Move Characters:
+* `U` - Move player up (row index DECREASES by 1)
+* `D` - Move player down (row index INCREASES by 1)
+* `L` - Move player left (column index DECREASES by 1)
+* `R` - Move player right (column index INCREASES by 1)
+## Grid Parsing:
+- Characters are separated by spaces. Row 0 is the top row. Column 0 is the leftmost column.
+- Parse each row carefully, character by character, and identify the (row, col) coordinates of every element.
+## Sokoban Rules:
+1. Player moves in four directions: U, D, L, R.
+2. Moving into a box pushes it one tile in the same direction, BUT only if the space beyond the box is empty (`-`), a goal (`X`), or player-on-goal (`%`). A box can also be pushed onto a space that is a goal with nothing blocking. The box then occupies that new space.
+3. Cannot push two boxes at once. Cannot walk through walls or boxes (unless pushing a single box with empty space behind it).
+4. Puzzle is solved when every `X` goal has a box on it. `$` (box on goal) already counts as solved for that goal.
+5. `%` means player is on a goal — that goal still needs a box placed on it.
+6. A `$` (box on goal) is still a box — it blocks movement and can be pushed just like `@`. If pushed off a goal, that goal becomes unsatisfied again.
+## MANDATORY SOLVING PROCESS — YOU MUST FOLLOW EVERY STEP:
+### Step 1: Parse the grid VERY carefully
+Go through the grid row by row, column by column. List every cell with its (row, col) coordinate. Explicitly write out:
+- Player position (from `*` or `%`)
+- Every box position (from both `@` and `$`)
+- Every goal position (from `X`, and also from `%` and `$` since those indicate goals too)
+- All wall positions (`+`)
+- All empty positions (`-`)
+Double-check your parsing by counting characters in each row to make sure you haven't skipped or misaligned any.
+### Step 2: Plan which box goes to which goal
+For each goal, determine which box should be pushed there. Consider:
+- Distances and accessibility
+- Whether pushing a box to a goal would block another box's path
+- Avoid deadlock situations (box in a corner that isn't a goal, box against a wall with no way to push it to any goal)
+### Step 3: Plan the path for each box
+For each box-goal assignment, determine the sequence of pushes needed. Remember:
+- To push a box UP: player must be BELOW the box (at box_row+1, box_col) and move U
+- To push a box DOWN: player must be ABOVE the box (at box_row-1, box_col) and move D
+- To push a box LEFT: player must be RIGHT of the box (at box_row, box_col+1) and move L
+- To push a box RIGHT: player must be LEFT of the box (at box_row, box_col-1) and move R
+### Step 4: Determine player navigation moves
+Between pushes, figure out how the player walks (without accidentally pushing boxes) to get into position for the next push. Be very careful about paths that go adjacent to boxes — moving into a box square pushes it, which may not be intended.
+### Step 5: Write out the COMPLETE move sequence and SIMULATE it step by step
+**This is the most critical step and you MUST NOT skip it.**
+After writing your candidate solution, simulate EVERY SINGLE MOVE from the initial state:
+- Write the state before each move: player position and all box positions
+- Apply the move: check if it's legal (not into a wall, not pushing a box into a wall or another box)
+- Write the state after the move
+- If a move is illegal or produces an unintended push, STOP and FIX your solution
+- Continue until all moves are simulated
+Format your simulation like this:
+```
+Move 1 (L): Player (3,2) → (3,1). No box pushed. Boxes: [(2,1)]
+Move 2 (U): Player (3,1) → (2,1). Box at (2,1) pushed to (1,1). Boxes: [(1,1)]
+```
+### Step 6: Verify solution
+After all moves are simulated, check:
+- Is every goal position occupied by a box?
+- If yes, the puzzle is solved.
+- If no, go back and fix your solution.
+## CRITICAL WARNINGS:
+- **Do NOT guess or reuse move sequences from other puzzles.** Every puzzle is different. Actually solve THIS puzzle step by step.
+- **Do NOT skip the simulation step.** This is where errors are caught. You MUST trace through every move.
+- **U means row DECREASES, D means row INCREASES.** Don't mix these up.
+- **Never push a box into a corner (two perpendicular walls) unless that corner is a goal** — this creates an unsolvable deadlock.
+- **Never push a box flat against a wall** if the goal is not along that wall — the box may become stuck.
+- **Be extremely careful when the player path goes adjacent to a box** — you might accidentally push it.
+- **`$` is a box ON a goal.** It counts as both a box and a satisfied goal. But if you push it off, the goal becomes unsatisfied.
+- **Each puzzle requires its own unique solution.** Do not output a generic or memorized sequence.
+- **If you have multiple boxes and goals**, solve them in an order that doesn't create deadlocks. Often it's best to solve the "deepest" or most constrained goals first.
+## EXAMPLE WALKTHROUGH:
+For this simple puzzle:
+```
++ + + +
++ X - +
++ @ - +
++ - * +
++ + + +
+```
+Parsing:
+- Row 0: + + + + (all walls)
+- Row 1: + X - + → goal at (1,1)
+- Row 2: + @ - + → box at (2,1)
+- Row 3: + - * + → player at (3,2)
+- Row 4: + + + + (all walls)
+Plan: Push box at (2,1) up to goal at (1,1).
+To push box up, player must be at (3,1) and move U.
+Player is at (3,2), needs to get to (3,1).
+Solution: LU
+Simulation:
+- Move 1 (L): Player (3,2) → (3,1). No box there. Legal. ✓
+- Move 2 (U): Player (3,1) → (2,1). Box at (2,1) pushed to (1,1). Space (1,1) is goal X — legal. ✓
+- Final state: Box at (1,1) which is the goal. SOLVED. ✓
+Answer: LU
+## Output Format:
+After your complete step-by-step work, provide your answer as a single string of move characters (U/D/L/R) inside answer tags:
+<answer>MOVES_HERE</answer>

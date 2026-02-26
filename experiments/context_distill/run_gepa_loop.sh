@@ -41,7 +41,7 @@ STEPS_PER_ITER="${STEPS_PER_ITER:-150}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/gepa_loop}"
 BASE_CONFIG="${BASE_CONFIG:-experiments/context_distill/rl_gepa_loop.toml}"
 OVERLAY_GENERATOR="${OVERLAY_GENERATOR:-experiments/context_distill/generate_gepa_overlay.py}"
-INITIAL_PROMPT="${INITIAL_PROMPT:-dspy_gepa/teacher_prompt.txt}"
+INITIAL_PROMPT="${INITIAL_PROMPT:-dspy_gepa/teacher_prompt_long.txt}"
 
 # Seed identifier (used in wandb names, logs)
 GEPA_SEED="${GEPA_SEED:-}"
