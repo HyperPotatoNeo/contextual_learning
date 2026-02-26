@@ -50,7 +50,7 @@ with open(sys.argv[1], 'rb') as f:
 print(c.get('gepa', {}).get('initial_prompt', ''))
 " "$BASE_CONFIG" 2>/dev/null || true)
 fi
-INITIAL_PROMPT="${INITIAL_PROMPT:-dspy_gepa/teacher_prompt_long.txt}"
+INITIAL_PROMPT="${INITIAL_PROMPT:-dspy_gepa/teacher_prompt.txt}"
 
 # Seed identifier (used in wandb names, logs)
 GEPA_SEED="${GEPA_SEED:-}"

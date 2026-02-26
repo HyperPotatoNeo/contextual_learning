@@ -10,7 +10,7 @@
 # GEPA Loop Settings (read by run_gepa_loop.sh, not by RL code)
 # ============================================================================
 [gepa]
-initial_prompt = "dspy_gepa/teacher_prompt_long.txt"
+initial_prompt = "dspy_gepa/teacher_prompt.txt"
 
 # ============================================================================
 # Training
