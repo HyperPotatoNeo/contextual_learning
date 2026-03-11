@@ -694,7 +694,7 @@ podman-hpc run --rm -it \
   --user "$(id -u):$(id -g)" --replace --name skyrl \
   --group-add keep-groups --userns keep-id --gpu --nccl --shm-size=8g \
   -e SCRATCH -e HOME \
-  -e WANDB_API_KEY=595199cad0de28f309ce22cb212dcbeeb21b06d8 \
+  -e WANDB_API_KEY \
   -v "$SCRATCH":"$SCRATCH" -v "$HOME":"$HOME" \
   -w "$SCRATCH/prime-rl" \
   docker.io/novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8 \
