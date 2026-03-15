@@ -81,6 +81,7 @@ def compute_loss(
     advantages: Any,  # list of Float[Tensor, "seq_i"] with potentially different seq_i lengths
     loss_mask: Any,  # list of Bool[Tensor, "seq_i"] with potentially different seq_i lengths
     kl_gates: Any | None = None,  # list of Float[Tensor, "seq_i"] for kl_only_incorrect gating, or None
+    sft_weights: Any | None = None,  # list of Float[Tensor, "seq_i"] for forward KL SFT, or None
     loss_config: LossConfig = LossConfig(),
     loss_scale: int = 1,
 ) -> tuple[Float[Tensor, ""], dict[str, Any]]:
@@ -119,15 +120,40 @@ def compute_loss(
     total_kl_contrib_abs = []
     total_raw_teacher_lp = []
     total_raw_trainer_lp = []
+    total_sft_loss = []
 
     if teacher_logprobs is None:
         teacher_logprobs = [None] * len(trainer_logprobs)
     if kl_gates is None:
         kl_gates = [None] * len(trainer_logprobs)
+    if sft_weights is None:
+        sft_weights = [None] * len(trainer_logprobs)
 
-    for trainer_logprobs, inference_logprobs, teacher_logprobs, advantages, loss_mask, kl_gates in zip(
-        trainer_logprobs, inference_logprobs, teacher_logprobs, advantages, loss_mask, kl_gates
+    for trainer_logprobs, inference_logprobs, teacher_logprobs, advantages, loss_mask, kl_gates, sft_weights in zip(
+        trainer_logprobs, inference_logprobs, teacher_logprobs, advantages, loss_mask, kl_gates, sft_weights
     ):
+        # SFT path: simple cross-entropy loss weighted by sft_weight (forward KL distillation)
+        if sft_weights is not None and loss_mask.any() and sft_weights[loss_mask].sum() > 0:
+            sft_w = sft_weights[loss_mask].mean()
+            sft_loss = -(sft_w * trainer_logprobs)[loss_mask].sum()
+            total_loss = total_loss + sft_loss
+            total_sft_loss.append(sft_loss.detach().to("cpu"))
+            # Fill in dummy metrics so stacking doesn't break (same device as loss tensors)
+            dev = trainer_logprobs.device
+            total_mismatch_kl.append(torch.tensor(0.0, device=dev))
+            total_masked_mismatch_kl.append(torch.tensor(0.0, device=dev))
+            total_unmasked_mismatch_kl.append(torch.tensor(0.0, device=dev))
+            total_is_masked.append(torch.zeros(loss_mask.sum().item(), device=dev))
+            total_is_masked_low.append(torch.zeros(loss_mask.sum().item(), device=dev))
+            total_is_masked_high.append(torch.zeros(loss_mask.sum().item(), device=dev))
+            total_sequence_masked_low.append(torch.tensor(0.0, device=dev))
+            total_sequence_masked_high.append(torch.tensor(0.0, device=dev))
+            total_geo_masked_low.append(torch.tensor(0.0, device=dev))
+            total_geo_masked_high.append(torch.tensor(0.0, device=dev))
+            total_geo_seq_ratio.append(torch.tensor(1.0, device=dev))
+            total_combined_advantage.append(torch.tensor(0.0, device=dev))
+            continue
+
         log_importance_ratio = trainer_logprobs - inference_logprobs
         teacher_kl = teacher_logprobs - trainer_logprobs if teacher_logprobs is not None else None
 
@@ -232,4 +258,6 @@ def compute_loss(
         result["raw_teacher_lp"] = torch.stack(total_raw_teacher_lp)
     if total_raw_trainer_lp:
         result["raw_trainer_lp"] = torch.stack(total_raw_trainer_lp)
+    if total_sft_loss:
+        result["sft_loss"] = torch.stack(total_sft_loss)
     return scaled_loss, result

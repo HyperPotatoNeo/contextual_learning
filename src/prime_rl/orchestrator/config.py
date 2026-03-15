@@ -684,6 +684,16 @@ class TeacherModelConfig(BaseConfig):
         ),
     ] = False
 
+    forward_kl: Annotated[
+        bool,
+        Field(
+            description="If True, enables forward KL distillation. Teacher generates its own rollouts "
+            "(with teacher context), and the student is trained with an additional SFT loss to maximize "
+            "likelihood of teacher-generated completions (conditioned on student prompt). "
+            "Requires context to be set. teacher_tau controls the SFT weight."
+        ),
+    ] = False
+
     share_teacher_weights: Annotated[
         bool,
         Field(
@@ -692,6 +702,18 @@ class TeacherModelConfig(BaseConfig):
             "When False (default), the teacher stays frozen at its initial weights."
         ),
     ] = False
+
+    sft_min_reward_gap: Annotated[
+        float | None,
+        Field(
+            description="When set, only add SFT loss for query groups where the teacher's average "
+            "reward exceeds the student's average reward by at least this threshold. "
+            "For example, sft_min_reward_gap=0.4 means SFT loss is only applied when "
+            "teacher_avg_reward - student_avg_reward > 0.4 for that query group. "
+            "Teacher RL samples (weight sharing) are unaffected. If None (default), "
+            "SFT loss is applied to all query groups."
+        ),
+    ] = None
 
 
 class OrchestratorConfig(BaseSettings):

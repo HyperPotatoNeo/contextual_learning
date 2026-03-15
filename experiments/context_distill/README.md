@@ -1,6 +1,10 @@
 # Context Distillation Experiment
 
-Train models using reverse-KL on-policy context distillation. The teacher model sees an enhanced prompt with additional context, while the student sees only the base prompt. The student learns to internalize the behavior implied by the teacher's context.
+Train models using context distillation. The teacher model sees an enhanced prompt with additional context, while the student sees only the base prompt. The student learns to internalize the behavior implied by the teacher's context.
+
+Two distillation modes are supported:
+- **Reverse KL** (default): Teacher computes logprobs on student-generated completions. Student is trained to match teacher's distribution via KL penalty in the advantage.
+- **Forward KL** (`forward_kl = true`): Teacher generates its own rollouts with context. Student is trained with an SFT loss to maximize likelihood of teacher completions (conditioned on the student prompt), plus standard RL on its own rollouts.
 
 ## Launch Training
 
@@ -19,9 +23,12 @@ uv run rl @ experiments/context_distill/rl.toml \
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `trainer.loss.adv_tau` | Weight for task reward | 0.5 |
-| `trainer.loss.teacher_tau` | Weight for teacher log prob term (distillation) | 0.5 |
-| `trainer.loss.student_tau` | Weight for student log prob term (entropy bonus) | 0.5 |
+| `trainer.loss.teacher_tau` | Weight for teacher log prob term (reverse KL) / SFT weight (forward KL) | 0.5 |
+| `trainer.loss.student_tau` | Weight for student log prob term (entropy bonus, reverse KL only) | 0.5 |
 | `orchestrator.teacher_model.context` | Extra context for teacher prompt | (required) |
+| `orchestrator.teacher_model.forward_kl` | Enable forward KL mode (teacher generates, student learns via SFT) | false |
+| `orchestrator.teacher_model.share_teacher_weights` | Include teacher RL samples in training (weight sharing) | false |
+| `orchestrator.teacher_model.sft_min_reward_gap` | Only apply SFT loss when teacher outperforms student by this gap | None |
 | `orchestrator.teacher_model.eval_baseline` | Run baseline eval before training | false |
 
 ### Modes
@@ -41,7 +48,7 @@ id = "sokoban-env"
 args = { ... }
 ```
 
-**Pure Distillation**: Only teacher signal, no task verification
+**Pure Distillation** (reverse KL): Only teacher signal, no task verification
 ```toml
 [trainer.loss]
 adv_tau = 0.0
@@ -53,6 +60,20 @@ skip_verification = true
 
 [orchestrator.teacher_model]
 context = "..."
+```
+
+**Forward KL Mode**: Teacher generates rollouts, student learns via SFT + RL
+```toml
+[trainer.loss]
+adv_tau = 1.0        # Weight for task reward (RL on student rollouts)
+teacher_tau = 1.0    # SFT weight on teacher completions
+student_tau = 0.0    # Unused in forward KL mode
+
+[orchestrator.teacher_model]
+forward_kl = true
+share_teacher_weights = true    # Include teacher rollouts in RL training
+context = "Think step by step..."
+# sft_min_reward_gap = 0.4     # Optional: only SFT when teacher >> student
 ```
 
 ### GPU Allocation
@@ -120,10 +141,15 @@ This logs:
 ## Monitoring
 
 Training metrics are logged to W&B:
-- `teacher_kl`: KL divergence from teacher to student (lower = more similar)
-- `combined_advantage`: Combined advantage (task reward + teacher signal)
+- `teacher_kl`: KL divergence from teacher to student (lower = more similar) [reverse KL]
+- `combined_advantage`: Combined advantage (task reward + teacher signal) [reverse KL]
 - `loss/policy`: Policy gradient loss
 - `reward/mean`: Mean task reward (if using hybrid mode)
+- `forward_kl/teacher_reward`: Mean teacher rollout reward [forward KL]
+- `forward_kl/student_reward`: Mean student rollout reward [forward KL]
+- `forward_kl/forward_kl`: Forward KL divergence (teacher || student) [forward KL]
+- `forward_kl/sft_gated_groups`: Number of groups passing SFT gate [forward KL, if gating enabled]
+- `sft_loss`: SFT loss on teacher completions [forward KL]
 
 ## Troubleshooting
 
@@ -142,7 +168,9 @@ Training metrics are logged to W&B:
 
 ## Files
 
-- `rl.toml` - Main training configuration
+- `rl.toml` - Main training configuration (reverse KL)
+- `forward_kl.toml` - Forward KL distillation configuration
+- `forward_kl_seed2.toml` - Forward KL with different seed (reproducibility)
 - `CLAUDE.md` - Implementation notes for AI assistants
 - `README.md` - This file
 

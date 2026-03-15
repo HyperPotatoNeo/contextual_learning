@@ -25,6 +25,9 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
     # KL gates: per-token broadcast of the sample's kl_gate scalar
     kl_gates = [training_example.kl_gate] * len(input_ids) if training_example.kl_gate is not None else None
 
+    # SFT weights: per-token broadcast of the sample's sft_weight scalar
+    sft_weights = [training_example.sft_weight] * len(input_ids) if training_example.sft_weight is not None else None
+
     if len(input_ids) > seq_len:
         input_ids = input_ids[:seq_len]
         loss_mask = loss_mask[:seq_len]
@@ -36,6 +39,8 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
             teacher_logprobs = teacher_logprobs[:seq_len]
         if kl_gates is not None:
             kl_gates = kl_gates[:seq_len]
+        if sft_weights is not None:
+            sft_weights = sft_weights[:seq_len]
 
     assert (
         len(input_ids)
@@ -51,6 +56,8 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
         assert len(teacher_logprobs) == len(input_ids), f"teacher_logprobs: {len(teacher_logprobs)}"
     if kl_gates is not None:
         assert len(kl_gates) == len(input_ids), f"kl_gates: {len(kl_gates)}"
+    if sft_weights is not None:
+        assert len(sft_weights) == len(input_ids), f"sft_weights: {len(sft_weights)}"
     return MicroBatch(
         input_ids=input_ids,
         advantages=advantages,
@@ -59,6 +66,7 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
         inference_logprobs=inference_logprobs,
         teacher_logprobs=teacher_logprobs,
         kl_gates=kl_gates,
+        sft_weights=sft_weights,
         temperatures=temperatures,
     )
 
@@ -94,6 +102,14 @@ def packed_samples_into_micro_bs(
                     if bin_content.kl_gates is None:
                         bin_content.kl_gates = []
                     bin_content.kl_gates.extend(sample.kl_gates)
+                if sample.sft_weights is not None:
+                    if bin_content.sft_weights is None:
+                        # Backfill zeros for tokens already in this bin
+                        bin_content.sft_weights = [0.0] * (len(bin_content.input_ids) - len(sample.input_ids))
+                    bin_content.sft_weights.extend(sample.sft_weights)
+                elif bin_content.sft_weights is not None:
+                    # RL sample packed into bin that already has sft_weights
+                    bin_content.sft_weights.extend([0.0] * len(sample.input_ids))
                 bin_content.position_ids.extend(sample.position_ids)
                 bin_content.lora_num_tokens[idx] += len(sample.input_ids)
                 break
@@ -132,6 +148,8 @@ def pad_micro_batch(micro_batch: MicroBatch, pad_to_multiple_of: int) -> MicroBa
         micro_batch.teacher_logprobs.extend([0.0] * padding_size)
     if micro_batch.kl_gates is not None:
         micro_batch.kl_gates.extend([1.0] * padding_size)
+    if micro_batch.sft_weights is not None:
+        micro_batch.sft_weights.extend([0.0] * padding_size)
     micro_batch.lora_num_tokens[-1] += (
         padding_size  # We send padding to the last lora so that tokens have ascending lora idx
     )

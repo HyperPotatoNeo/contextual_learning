@@ -136,6 +136,7 @@ def branch_rollout(state: vf.State) -> list[TrainingSample] | None:
             completion_temperatures=[temperature] * len(completion_ids),  # Per-token temperatures
             advantage=step.get("advantage"),  # Pre-computed by env (e.g. RSAgent per_step_grpo)
             reward=step.get("reward"),  # Pre-computed by env (e.g. RSAgent per_step_grpo)
+            kl_gate=step.get("kl_gate"),  # Pre-computed by env (e.g. RSA-Distill KL gating)
             teacher_logprobs=None,
             prompt_text=_extract_prompt_text(step.get("prompt")),  # For context distillation
         )

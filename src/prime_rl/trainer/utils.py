@@ -22,7 +22,7 @@ from prime_rl.utils.logger import get_logger
 from prime_rl.utils.pathing import get_ckpt_dir
 from prime_rl.utils.utils import format_num, format_time, get_step_path
 
-DEFAULT_TIMEOUT = timedelta(seconds=600)
+DEFAULT_TIMEOUT = timedelta(seconds=3600)
 
 
 def get_ckpt_disk_metrics(output_dir: Path) -> dict[str, float]:

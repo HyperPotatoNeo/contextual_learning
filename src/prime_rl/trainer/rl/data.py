@@ -23,6 +23,7 @@ class TensorMicroBatch(TypedDict):
     inference_logprobs: Float[Tensor, "batch seq"]
     teacher_logprobs: Float[Tensor, "batch seq"] | None
     kl_gates: Float[Tensor, "batch seq"] | None
+    sft_weights: Float[Tensor, "batch seq"] | None
     loss_mask: Bool[Tensor, "batch seq"]
     temperatures: Float[Tensor, "batch seq"]  # Per-token temperatures
 
@@ -95,6 +96,7 @@ class FakeDataLoader:
             "inference_logprobs": inference_logprobs.unsqueeze(0),
             "teacher_logprobs": None,
             "kl_gates": None,
+            "sft_weights": None,
             "temperatures": torch.ones(input_ids.shape[0]).unsqueeze(0),
             "loss_mask": loss_mask.unsqueeze(0),
             "lora_num_tokens": lora_num_tokens,
@@ -118,6 +120,7 @@ class FakeDataLoader:
             "inference_logprobs": torch.randn(self.seq_len, generator=generator).unsqueeze(0),
             "teacher_logprobs": None,
             "kl_gates": None,
+            "sft_weights": None,
             "temperatures": torch.ones(self.seq_len).unsqueeze(0),
             "loss_mask": torch.ones(self.seq_len, dtype=torch.bool).unsqueeze(0),
             "lora_num_tokens": lora_num_tokens,
@@ -180,6 +183,9 @@ class DataLoader:
             else None,
             kl_gates=torch.tensor(micro_batch.kl_gates, dtype=torch.float).unsqueeze(0)
             if micro_batch.kl_gates is not None
+            else None,
+            sft_weights=torch.tensor(micro_batch.sft_weights, dtype=torch.float).unsqueeze(0)
+            if micro_batch.sft_weights is not None
             else None,
             loss_mask=torch.tensor(micro_batch.loss_mask, dtype=torch.bool).unsqueeze(0),
             temperatures=torch.tensor(micro_batch.temperatures, dtype=torch.float).unsqueeze(0),

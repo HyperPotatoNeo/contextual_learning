@@ -15,6 +15,7 @@ class TrainingSample(msgspec.Struct, array_like=True, gc=False, omit_defaults=Tr
     advantage: float | None = None
     reward: float | None = None
     kl_gate: float | None = None  # Per-sample KL gate (1 - group_task_mean) for kl_only_incorrect
+    sft_weight: float | None = None  # Per-sample SFT weight for forward KL distillation
     prompt_text: str | None = None  # Original prompt text for context distillation
 
 
@@ -38,4 +39,5 @@ class MicroBatch(msgspec.Struct, array_like=True, gc=False, omit_defaults=True):
     temperatures: list[float]  # Per-token temperatures used during generation
     teacher_logprobs: list[float] | None = None
     kl_gates: list[float] | None = None  # Per-token KL gates for kl_only_incorrect
+    sft_weights: list[float] | None = None  # Per-token SFT weights for forward KL distillation
     lora_num_tokens: list[int] | None = None

@@ -396,6 +396,16 @@ class RLConfig(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def auto_setup_forward_kl(self):
+        # Forward KL mode: disable use_full_reward_baseline (no reverse KL terms)
+        if self.orchestrator.teacher_model is not None and self.orchestrator.teacher_model.forward_kl:
+            if self.orchestrator.advantage is not None:
+                self.orchestrator.advantage.use_full_reward_baseline = False
+            self.trainer.loss.use_full_reward_baseline = False
+
+        return self
+
+    @model_validator(mode="after")
     def auto_setup_output_dir(self):
         # If specified, use the same outputs directory for trainer and orchestrator
         if self.output_dir is not None:

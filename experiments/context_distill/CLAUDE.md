@@ -1,12 +1,16 @@
 # Context Distillation Implementation Notes
 
-This file documents the reverse-KL on-policy context distillation feature for future reference.
+This file documents the context distillation feature for future reference.
 
 ## What is Context Distillation?
 
 Context distillation trains a student model to match a teacher model's behavior, where the teacher has access to additional context (e.g., system prompt with instructions) that the student doesn't see. The student learns to internalize the behavior implied by the teacher's context.
 
 **Key insight**: Same model weights, different prompts. The teacher sees an enhanced prompt, the student sees the base prompt.
+
+Two modes are supported:
+- **Reverse KL** (default): Teacher computes logprobs on student completions. KL penalty in advantage.
+- **Forward KL** (`forward_kl = true`): Teacher generates its own rollouts. Student learns via SFT on teacher completions + RL on its own rollouts.
 
 ## Architecture
 
@@ -206,8 +210,96 @@ print('All imports successful')
 "
 ```
 
+## Forward KL Distillation
+
+Forward KL mode (`forward_kl = true`) changes the distillation approach fundamentally:
+
+### Architecture
+
+```
+Student Inference (GPU 0):
+  [User: Base Prompt] → vLLM → [Student Completion] + student_logprobs
+
+Teacher Inference (GPU 1):
+  [User: Context + Base Prompt] → vLLM → [Teacher Completion] + teacher_logprobs
+
+SFT Loss:
+  loss_sft = -sft_weight * sum_t log p_student(teacher_token_t | student_prompt)
+
+RL Loss:
+  Standard GRPO/AIPO on student rollouts (task reward only, no reverse KL terms)
+```
+
+### Key Differences from Reverse KL
+
+| Aspect | Reverse KL | Forward KL |
+|--------|-----------|------------|
+| Who generates? | Student only | Both student and teacher |
+| Teacher role | Computes logprobs on student completions | Generates own completions |
+| Student loss | RL with KL penalty in advantage | RL on own rollouts + SFT on teacher completions |
+| Mode behavior | Mode-seeking (student avoids low-teacher-prob regions) | Mode-covering (student learns to produce teacher-like outputs) |
+| `use_full_reward_baseline` | Normal | Auto-disabled (no reverse KL terms) |
+
+### Implementation Details
+
+**Orchestrator** (`orchestrator.py`):
+1. Extract unique examples from student rollouts
+2. Modify examples with teacher context
+3. Generate teacher rollouts via `generate_batch()` on teacher inference servers
+4. Create `TrainingSample` objects with `sft_weight` for SFT loss:
+   - `prompt_ids`: student prompt (no context)
+   - `completion_ids`: teacher completion tokens
+   - `sft_weight`: `teacher_tau` from loss config
+   - `advantage`: 0.0 (SFT samples don't use RL advantage)
+5. Optionally gate SFT samples by per-group reward gap (`sft_min_reward_gap`)
+6. If `share_teacher_weights=true`, also create teacher RL samples with separate advantages
+7. Append SFT + teacher RL samples to `train_examples`
+
+**Loss** (`loss.py`):
+- SFT samples detected via `sft_weights` tensor (non-None, non-zero)
+- SFT loss: `-sft_weight * trainer_logprobs[loss_mask].sum()` (weighted cross-entropy)
+- RL samples: unchanged GRPO/AIPO loss (no teacher KL terms since `use_full_reward_baseline=False`)
+
+**Data pipeline** (`types.py`, `batch.py`, `data.py`, `train.py`):
+- `sft_weight` field on `TrainingSample` → `sft_weights` on `MicroBatch` → `sft_weights` tensor
+- Handles packing: backfill with 0.0 when SFT and RL samples share a micro-batch
+
+### SFT Gating (`sft_min_reward_gap`)
+
+When set, SFT loss is only applied for query groups where the teacher significantly outperforms the student:
+```
+teacher_avg_reward - student_avg_reward > sft_min_reward_gap
+```
+This prevents the student from imitating the teacher on problems it already solves well.
+
+### Forward KL Metrics
+
+Logged to W&B:
+- `forward_kl/teacher_reward`: Mean teacher rollout reward
+- `forward_kl/student_reward`: Mean student rollout reward
+- `forward_kl/forward_kl`: KL(teacher || student) on teacher completions
+- `forward_kl/sft_gated_groups`: Groups passing SFT gate (if gating enabled)
+- `forward_kl/sft_gated_ratio`: Fraction of groups passing SFT gate
+- `sft_loss`: SFT loss component
+- `time/forward_kl`: Time spent on forward KL processing
+
+### Configuration
+
+```toml
+[trainer.loss]
+adv_tau = 1.0        # Weight for task reward (RL)
+teacher_tau = 1.0    # SFT weight on teacher completions
+student_tau = 0.0    # Unused in forward KL
+
+[orchestrator.teacher_model]
+forward_kl = true
+share_teacher_weights = true     # Teacher rollouts also used for RL
+context = "Your teacher context..."
+# sft_min_reward_gap = 0.4      # Optional gating
+```
+
 ## Future Improvements
 
 1. **Per-sample context**: Allow different contexts for different samples
 2. **Context caching**: Cache tokenized context prefix for efficiency
-3. **Metrics**: Add specific context distillation metrics to W&B
+3. **Forward KL + reverse KL hybrid**: Combine both divergence directions

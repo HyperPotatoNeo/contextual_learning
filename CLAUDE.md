@@ -109,11 +109,20 @@ torchrun --nproc-per-node 4 src/prime_rl/trainer/rl/train.py @ config.toml
 
 ## Context Distillation
 
-This fork adds **context distillation** - training a student to match a teacher that has additional context:
+This fork adds **context distillation** - training a student to match a teacher that has additional context. Two modes:
+
+- **Reverse KL** (default): Teacher computes logprobs on student completions. KL penalty in advantage.
+- **Forward KL** (`forward_kl = true`): Teacher generates own rollouts. Student learns via SFT on teacher completions + RL on own rollouts.
 
 ```bash
-# Run context distillation experiment
+# Reverse KL distillation
 rl @ experiments/context_distill/rl.toml \
+  --inference_gpu_ids 0 \
+  --teacher_gpu_ids 1 \
+  --trainer_gpu_ids 2,3
+
+# Forward KL distillation
+rl @ experiments/context_distill/forward_kl.toml \
   --inference_gpu_ids 0 \
   --teacher_gpu_ids 1 \
   --trainer_gpu_ids 2,3
@@ -185,11 +194,24 @@ Available via `trainer.loss.type`:
 
 ### Context Distillation Loss Parameters
 
+**Reverse KL mode:**
 ```toml
 [trainer.loss]
 adv_tau = 0.5       # Weight for task reward
 teacher_tau = 0.5   # Weight for teacher log prob (distillation)
 student_tau = 0.5   # Weight for student log prob (entropy bonus)
+```
+
+**Forward KL mode:**
+```toml
+[trainer.loss]
+adv_tau = 1.0       # Weight for task reward (RL on student rollouts)
+teacher_tau = 1.0   # SFT weight on teacher completions
+student_tau = 0.0   # Unused in forward KL
+
+[orchestrator.teacher_model]
+forward_kl = true
+share_teacher_weights = true  # Teacher rollouts also used for RL
 ```
 
 ## LoRA Training

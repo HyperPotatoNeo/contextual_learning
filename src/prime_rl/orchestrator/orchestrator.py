@@ -482,15 +482,216 @@ async def orchestrate(config: OrchestratorConfig):
             f"Converted {len(train_rollouts)} training rollouts to {len(train_examples)} training examples using {config.trajectory_strategy} strategy"
         )
 
-        # Compute teacher logprobs if teacher model is configured
+        # Forward KL or reverse KL distillation
         teacher_logprobs_time = 0
-        teacher_logprobs_list: list[list[float]] | None = None
-        if config.teacher_model is not None:
+        forward_kl_time = 0
+        forward_kl_metrics: dict[str, float] = {}
+        sft_examples: list[TrainingSample] = []
+        teacher_rl_examples: list[TrainingSample] = []
+        teacher_rl_rollout_to_example_indices: list[list[int]] = []
+        teacher_rl_rewards: list[float] = []
+
+        if config.teacher_model is not None and config.teacher_model.forward_kl:
+            # ---- Forward KL: teacher generates, student learns via SFT ----
+            forward_kl_start_time = time.perf_counter()
+            use_full_reward_baseline = False  # No reverse KL terms in advantage
+            teacher_context = config.teacher_model.context
+
+            # 1. Extract unique examples and student prompt_ids from student rollouts
+            seen_example_keys: set[tuple[str, int]] = set()
+            teacher_examples: list[dict] = []
+            student_prompt_ids_by_example: dict[tuple[str, int], list[int]] = {}
+            for rollout in train_rollouts:
+                key = (rollout["task"], rollout["example_id"])
+                if key not in seen_example_keys:
+                    seen_example_keys.add(key)
+                    example = buffer.example_buffer[rollout["task"]][rollout["example_id"]]
+                    teacher_examples.append(example)
+                if key not in student_prompt_ids_by_example:
+                    first_step = rollout["trajectory"][0]
+                    if first_step.get("tokens"):
+                        student_prompt_ids_by_example[key] = list(first_step["tokens"]["prompt_ids"])
+
+            # 2. Modify examples with teacher context for teacher generation
+            from copy import deepcopy
+
+            teacher_examples_with_context = []
+            for example in teacher_examples:
+                modified = deepcopy(example)
+                if teacher_context and "prompt" in modified:
+                    if isinstance(modified["prompt"], str):
+                        modified["prompt"] = [
+                            {"role": "system", "content": teacher_context},
+                            {"role": "user", "content": modified["prompt"]},
+                        ]
+                    elif isinstance(modified["prompt"], list):
+                        has_system = any(msg.get("role") == "system" for msg in modified["prompt"])
+                        if has_system:
+                            for msg in modified["prompt"]:
+                                if msg.get("role") == "system":
+                                    msg["content"] = teacher_context
+                                    break
+                        else:
+                            modified["prompt"].insert(0, {"role": "system", "content": teacher_context})
+                teacher_examples_with_context.append(modified)
+
+            # 3. Generate teacher rollouts
+            logger.info(f"Forward KL: generating teacher rollouts for {len(teacher_examples_with_context)} examples")
+            teacher_rollouts_raw = await generate_batch(
+                clients=teacher_clients,
+                env=env,
+                model_name=teacher_model_name,
+                examples=teacher_examples_with_context,
+                rollouts_per_example=config.rollouts_per_example,
+                sampling_args=get_sampling_args(config.sampling, temperature=temperature),
+                pbar_description="Generating teacher rollouts (forward KL)",
+            )
+
+            # Add temperature to teacher trajectory steps (generate_batch returns
+            # raw vf.State which doesn't include temperature unlike env worker output)
+            for rollout in teacher_rollouts_raw:
+                for step in rollout.get("trajectory", []):
+                    if "temperature" not in step:
+                        step["temperature"] = temperature
+
+            # 4. Compute reward metrics
+            teacher_rewards_list = [r["reward"] for r in teacher_rollouts_raw]
+            student_rewards_list = [r["reward"] for r in train_rollouts]
+            forward_kl_metrics["forward_kl/teacher_reward"] = (
+                sum(teacher_rewards_list) / len(teacher_rewards_list) if teacher_rewards_list else 0
+            )
+            forward_kl_metrics["forward_kl/student_reward"] = (
+                sum(student_rewards_list) / len(student_rewards_list) if student_rewards_list else 0
+            )
+
+            # 5. Create SFT TrainingSamples: student prompt + teacher completion
+            sft_weight = config.advantage.teacher_tau if config.advantage else 1.0
+            teacher_completion_logprobs_for_kl: list[list[float]] = []
+            sft_prefill_samples: list[TrainingSample] = []
+
+            # Gate SFT samples by per-group reward gap if configured
+            sft_min_gap = config.teacher_model.sft_min_reward_gap
+            sft_gated_groups: set[tuple[str, int]] | None = None
+            if sft_min_gap is not None:
+                student_rewards_by_example: dict[tuple[str, int], list[float]] = {}
+                for rollout in train_rollouts:
+                    key = (rollout["task"], rollout["example_id"])
+                    student_rewards_by_example.setdefault(key, []).append(rollout["reward"])
+                teacher_rewards_by_example: dict[tuple[str, int], list[float]] = {}
+                for rollout in teacher_rollouts_raw:
+                    key = (rollout["task"], rollout["example_id"])
+                    teacher_rewards_by_example.setdefault(key, []).append(rollout["reward"])
+                sft_gated_groups = set()
+                for key in teacher_rewards_by_example:
+                    t_avg = sum(teacher_rewards_by_example[key]) / len(teacher_rewards_by_example[key])
+                    s_avg = sum(student_rewards_by_example.get(key, [0.0])) / max(
+                        len(student_rewards_by_example.get(key, [0.0])), 1
+                    )
+                    if t_avg - s_avg > sft_min_gap:
+                        sft_gated_groups.add(key)
+                logger.info(
+                    f"Forward KL: SFT gating enabled (threshold={sft_min_gap}), "
+                    f"{len(sft_gated_groups)}/{len(teacher_rewards_by_example)} groups pass"
+                )
+
+            for teacher_rollout in teacher_rollouts_raw:
+                key = (teacher_rollout["task"], teacher_rollout["example_id"])
+                # Skip SFT samples for groups where teacher doesn't outperform student enough
+                if sft_gated_groups is not None and key not in sft_gated_groups:
+                    continue
+                student_prompt = student_prompt_ids_by_example.get(key)
+                if student_prompt is None:
+                    continue
+                trajectory = teacher_rollout["trajectory"]
+                if not trajectory or trajectory[0].get("tokens") is None:
+                    continue
+
+                # Build teacher completion via interleave (handles multi-turn)
+                teacher_sample_list = make_train_example(teacher_rollout)
+                if not teacher_sample_list:
+                    continue
+                ts = teacher_sample_list[0]
+
+                sft_sample = TrainingSample(
+                    prompt_ids=list(student_prompt),
+                    prompt_mask=[False] * len(student_prompt),
+                    completion_ids=list(ts.completion_ids),
+                    completion_mask=list(ts.completion_mask),
+                    completion_logprobs=[0.0] * len(ts.completion_ids),
+                    completion_temperatures=list(ts.completion_temperatures),
+                    advantage=0.0,
+                    sft_weight=sft_weight,
+                )
+                sft_examples.append(sft_sample)
+                teacher_completion_logprobs_for_kl.append(list(ts.completion_logprobs))
+
+                # Prefill sample for computing student logprobs on teacher completion
+                sft_prefill_samples.append(
+                    TrainingSample(
+                        prompt_ids=list(student_prompt),
+                        prompt_mask=[False] * len(student_prompt),
+                        completion_ids=list(ts.completion_ids),
+                        completion_mask=[True] * len(ts.completion_ids),
+                        completion_logprobs=[0.0] * len(ts.completion_ids),
+                        completion_temperatures=[1.0] * len(ts.completion_ids),
+                    )
+                )
+
+            logger.info(f"Forward KL: created {len(sft_examples)} SFT samples (sft_weight={sft_weight})")
+            if sft_gated_groups is not None:
+                total_groups = len(teacher_rewards_by_example)
+                forward_kl_metrics["forward_kl/sft_gated_groups"] = len(sft_gated_groups)
+                forward_kl_metrics["forward_kl/sft_gated_ratio"] = (
+                    len(sft_gated_groups) / total_groups if total_groups > 0 else 0
+                )
+
+            # 6. Compute student logprobs on teacher completions for forward KL metric
+            if sft_prefill_samples:
+                student_logprobs_on_teacher = await compute_teacher_logprobs(
+                    clients=clients,
+                    model_name=config.model.name,
+                    samples=sft_prefill_samples,
+                )
+                forward_kls = []
+                for teacher_lps, student_all_lps, prefill_sample in zip(
+                    teacher_completion_logprobs_for_kl, student_logprobs_on_teacher, sft_prefill_samples
+                ):
+                    student_completion_lps = student_all_lps[len(prefill_sample.prompt_ids) :]
+                    min_len = min(len(teacher_lps), len(student_completion_lps))
+                    if min_len > 0:
+                        fkl = sum(teacher_lps[i] - student_completion_lps[i] for i in range(min_len))
+                        forward_kls.append(fkl)
+                if forward_kls:
+                    forward_kl_metrics["forward_kl/forward_kl"] = sum(forward_kls) / len(forward_kls)
+
+            # 7. If weight sharing, create teacher RL samples with separate advantages
+            if config.teacher_model.share_teacher_weights:
+                teacher_rl_rewards = teacher_rewards_list
+                for teacher_rollout in teacher_rollouts_raw:
+                    teacher_example_list = make_train_example(teacher_rollout)
+                    if teacher_example_list is not None:
+                        indices = list(
+                            range(len(teacher_rl_examples), len(teacher_rl_examples) + len(teacher_example_list))
+                        )
+                        teacher_rl_rollout_to_example_indices.append(indices)
+                        for te in teacher_example_list:
+                            if te.reward is None:
+                                te.reward = teacher_rollout["reward"]
+                        teacher_rl_examples.extend(teacher_example_list)
+                    else:
+                        teacher_rl_rollout_to_example_indices.append([])
+                logger.info(f"Forward KL: created {len(teacher_rl_examples)} teacher RL samples (weight sharing)")
+
+            forward_kl_time = time.perf_counter() - forward_kl_start_time
+            logger.debug(f"Forward KL processing completed in {forward_kl_time:.2f}s")
+
+        elif config.teacher_model is not None:
+            # ---- Reverse KL: compute teacher logprobs on student completions ----
+            teacher_logprobs_list: list[list[float]] | None = None
             logger.info(f"Computing teacher logprobs for {len(train_examples)} training examples")
             teacher_logprobs_start_time = time.perf_counter()
 
             if config.teacher_model.context is not None:
-                # Context distillation mode: teacher sees different (enhanced) prompt
                 logger.debug("Using context distillation mode for teacher logprobs")
                 teacher_logprobs_list = await compute_teacher_logprobs_with_context(
                     clients=teacher_clients,
@@ -499,12 +700,10 @@ async def orchestrate(config: OrchestratorConfig):
                     tokenizer=tokenizer,
                     teacher_context=config.teacher_model.context,
                 )
-                # Pad with zeros for prompt positions (teacher logprobs only cover completion)
                 for train_example, completion_logprobs in zip(train_examples, teacher_logprobs_list):
                     prompt_logprobs = [0.0] * len(train_example.prompt_ids)
                     train_example.teacher_logprobs = prompt_logprobs + completion_logprobs
             else:
-                # Standard distillation: teacher sees same prompt as student
                 teacher_logprobs_list = await compute_teacher_logprobs(
                     clients=teacher_clients,
                     model_name=teacher_model_name,
@@ -572,6 +771,24 @@ async def orchestrate(config: OrchestratorConfig):
                     train_examples[idx].advantage = advantages[rollout_idx]
                 if kl_gates is not None and train_examples[idx].kl_gate is None:
                     train_examples[idx].kl_gate = kl_gates[rollout_idx]
+
+        # Extend train_examples with forward KL samples (SFT + teacher RL)
+        if sft_examples:
+            train_examples.extend(sft_examples)
+        if teacher_rl_examples:
+            # Compute teacher advantages within teacher group
+            teacher_completion_lens = [get_completion_len(r) for r in teacher_rollouts_raw]
+            teacher_advantages = compute_advantages(
+                teacher_rl_rewards,
+                teacher_completion_lens,
+                config.rollouts_per_example,
+                config.advantage,
+            )
+            for rollout_idx, indices in enumerate(teacher_rl_rollout_to_example_indices):
+                for idx in indices:
+                    if teacher_rl_examples[idx].advantage is None:
+                        teacher_rl_examples[idx].advantage = teacher_advantages[rollout_idx]
+            train_examples.extend(teacher_rl_examples)
 
         training_batch = TrainingBatch(
             examples=train_examples,
@@ -706,7 +923,10 @@ async def orchestrate(config: OrchestratorConfig):
             "time/step": step_time,
             "time/generate_completions": generate_completions_time,
             "time/teacher_logprobs": teacher_logprobs_time,
+            "time/forward_kl": forward_kl_time,
             "time/save_ckpt": save_ckpt_time,
+            # Forward KL metrics
+            **forward_kl_metrics,
             # Scheduler metrics
             **scheduler.get_metrics(),
             # Buffer metrics
